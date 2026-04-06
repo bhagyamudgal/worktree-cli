@@ -64,6 +64,23 @@ main() {
     echo ""
     echo -e "${GREEN}${BOLD}Done!${NC} Run ${BOLD}worktree help${NC} to get started."
     echo ""
+
+    SHELL_CONFIG=""
+    if [ -f "${HOME}/.zshrc" ]; then
+        SHELL_CONFIG="${HOME}/.zshrc"
+    elif [ -f "${HOME}/.bashrc" ]; then
+        SHELL_CONFIG="${HOME}/.bashrc"
+    elif [ -f "${HOME}/.bash_profile" ]; then
+        SHELL_CONFIG="${HOME}/.bash_profile"
+    fi
+
+    if [ -n "$SHELL_CONFIG" ]; then
+        echo -e "  ${DIM}Optional: Add a short alias:${NC}"
+        echo -e "    echo 'alias gw=worktree' >> ${SHELL_CONFIG}"
+        echo -e "  ${DIM}Then reload: source ${SHELL_CONFIG}${NC}"
+        echo ""
+    fi
+
     echo -e "  ${DIM}Tip: Add a .worktreerc to your repo root:${NC}"
     echo -e "  ${DIM}  DEFAULT_BASE=origin/dev${NC}"
     echo ""
