@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Editor prompt now uses interactive arrow-key selector instead of numeric input
 - Dependency install failure now warns and continues instead of aborting
 - Config parser now preserves whitespace in values and supports quoted values
+- Updated README with complete CLI options, list output details, safety features, dev commands, CI info, and release workflow
 
 ### Removed
 
