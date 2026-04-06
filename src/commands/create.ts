@@ -40,6 +40,14 @@ export const createCommand = command({
         let base = opts.base ?? config.DEFAULT_BASE ?? "";
         const worktreePath = path.join(root, config.WORKTREE_DIR, opts.name);
 
+        const worktreeBaseDir = path.join(root, config.WORKTREE_DIR);
+        const gitignorePath = path.join(worktreeBaseDir, ".gitignore");
+        const gitignoreExists = await fs.stat(gitignorePath).catch(() => null);
+        if (!gitignoreExists) {
+            await fs.mkdir(worktreeBaseDir, { recursive: true });
+            await fs.writeFile(gitignorePath, "*\n");
+        }
+
         const dirExists = await fs.stat(worktreePath).catch(() => null);
         if (dirExists) {
             printError(
