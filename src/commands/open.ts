@@ -18,7 +18,8 @@ export const openCommand = command({
         const root = await getGitRoot();
         const config = await loadConfig(root);
 
-        const name = opts.name ?? (await selectWorktree(root));
+        const name =
+            opts.name ?? (await selectWorktree(root, config.WORKTREE_DIR));
         const worktreePath = path.join(root, config.WORKTREE_DIR, name);
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);

@@ -57,7 +57,8 @@ export const removeCommand = command({
     handler: async (opts) => {
         const root = await getGitRoot();
         const config = await loadConfig(root);
-        const name = opts.name ?? (await selectWorktree(root));
+        const name =
+            opts.name ?? (await selectWorktree(root, config.WORKTREE_DIR));
         const worktreeBase = path.join(root, config.WORKTREE_DIR);
         const worktreePath = path.join(worktreeBase, name);
 

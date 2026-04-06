@@ -42,17 +42,17 @@ async function loadConfig(root: string): Promise<Config> {
     const isExists = await file.exists();
 
     if (!isExists) {
-        return configSchema.parse({});
+        return validateConfig({});
     }
 
     const { data: content, error } = await tryCatch(file.text());
 
     if (error) {
-        return configSchema.parse({});
+        return validateConfig({});
     }
 
     const raw = parseConfigContent(content);
-    return configSchema.parse(raw);
+    return validateConfig(raw);
 }
 
 export { loadConfig, parseConfigContent, validateConfig };

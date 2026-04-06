@@ -1,4 +1,5 @@
 import * as p from "@clack/prompts";
+import path from "node:path";
 import { run } from "./shell";
 import { printError } from "./logger";
 import { EXIT_CODES } from "./constants";
@@ -167,7 +168,10 @@ async function gitRevParseGitDir(cwd: string): Promise<boolean> {
     return result.exitCode === 0;
 }
 
-async function selectWorktree(root: string): Promise<string> {
+async function selectWorktree(
+    root: string,
+    worktreeDir: string
+): Promise<string> {
     await gitWorktreePrune();
 
     const output = await gitWorktreeListPorcelain();
@@ -178,8 +182,13 @@ async function selectWorktree(root: string): Promise<string> {
         process.exit(EXIT_CODES.ERROR);
     }
 
+    const worktreeBase = path.join(root, worktreeDir);
     const entries = parsePorcelainOutput(output);
-    const worktreeEntries = entries.filter((entry) => entry.path !== root);
+    const worktreeEntries = entries.filter(
+        (entry) =>
+            entry.path !== root &&
+            entry.path.startsWith(worktreeBase + path.sep)
+    );
 
     if (worktreeEntries.length === 0) {
         printError(
@@ -200,7 +209,7 @@ async function selectWorktree(root: string): Promise<string> {
             if (behind > 0) parts.push(`${behind} behind`);
             const hint = parts.length > 0 ? parts.join(", ") : "clean";
 
-            const name = entry.path.split("/").pop() ?? entry.branch;
+            const name = path.relative(worktreeBase, entry.path);
             return { value: name, label: entry.branch || name, hint };
         })
     );
@@ -214,6 +223,7 @@ async function selectWorktree(root: string): Promise<string> {
         process.exit(EXIT_CODES.SUCCESS);
     }
 
+    // p.select returns string | symbol, but isCancel above exits on symbol — library types don't narrow
     return selected as string;
 }
 
