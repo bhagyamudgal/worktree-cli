@@ -43,9 +43,11 @@ export const createCommand = command({
         const worktreeBaseDir = path.join(root, config.WORKTREE_DIR);
         const gitignorePath = path.join(worktreeBaseDir, ".gitignore");
         await fs.mkdir(worktreeBaseDir, { recursive: true });
-        await fs
-            .writeFile(gitignorePath, "*\n", { flag: "wx" })
-            .catch(() => {});
+        await fs.writeFile(gitignorePath, "*\n", { flag: "wx" }).catch((e) => {
+            if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+                printWarn("  Could not create .worktrees/.gitignore.");
+            }
+        });
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);
         if (dirExists) {

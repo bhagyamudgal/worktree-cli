@@ -199,8 +199,10 @@ async function selectWorktree(
 
     const options = await Promise.all(
         worktreeEntries.map(async (entry) => {
-            const changes = await gitStatusCount(entry.path);
-            const { ahead, behind } = await gitAheadBehind(entry.path);
+            const [changes, { ahead, behind }] = await Promise.all([
+                gitStatusCount(entry.path),
+                gitAheadBehind(entry.path),
+            ]);
 
             const parts: string[] = [];
             if (changes > 0)
