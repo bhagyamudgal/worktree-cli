@@ -102,9 +102,9 @@ async function gitWorktreePrune(expire?: string): Promise<boolean> {
 }
 
 async function gitStatusCount(cwd: string): Promise<number> {
-    const result = await run("git", ["status", "--porcelain", "-uno"], { cwd });
+    const result = await run("git", ["status", "--porcelain"], { cwd });
     if (result.exitCode !== 0 || result.stdout === "") return 0;
-    return result.stdout.split("\n").length;
+    return result.stdout.split("\n").filter(Boolean).length;
 }
 
 async function gitAheadBehind(
