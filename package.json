@@ -16,6 +16,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "bun test",
     "prepare": "husky"
   },
   "lint-staged": {
