@@ -33,7 +33,7 @@ async function gitWorktreeAdd(
 ): Promise<void> {
     const result = await run(
         "git",
-        ["worktree", "add", worktreePath, "-B", branch, startPoint],
+        ["worktree", "add", "-B", branch, worktreePath, startPoint],
         { inherit: true }
     );
     if (result.exitCode !== 0) {
@@ -57,11 +57,46 @@ async function gitWorktreeRemove(
 
 async function gitWorktreeListPorcelain(): Promise<string> {
     const result = await run("git", ["worktree", "list", "--porcelain"]);
+    if (result.exitCode !== 0) {
+        printError(`git worktree list failed: ${result.stderr}`);
+        process.exit(EXIT_CODES.ERROR);
+    }
     return result.stdout;
 }
 
-async function gitWorktreePrune(): Promise<boolean> {
-    const result = await run("git", ["worktree", "prune"]);
+type WorktreeEntry = {
+    path: string;
+    branch: string;
+};
+
+function parsePorcelainOutput(output: string): WorktreeEntry[] {
+    const entries: WorktreeEntry[] = [];
+    let currentPath = "";
+    let currentBranch = "";
+
+    for (const line of output.split("\n")) {
+        if (line.startsWith("worktree ")) {
+            if (currentPath) {
+                entries.push({ path: currentPath, branch: currentBranch });
+            }
+            currentPath = line.slice("worktree ".length);
+            currentBranch = "";
+        } else if (line.startsWith("branch refs/heads/")) {
+            currentBranch = line.slice("branch refs/heads/".length);
+        }
+    }
+
+    if (currentPath) {
+        entries.push({ path: currentPath, branch: currentBranch });
+    }
+
+    return entries;
+}
+
+async function gitWorktreePrune(expire?: string): Promise<boolean> {
+    const args = ["worktree", "prune"];
+    if (expire) args.push("--expire", expire);
+    const result = await run("git", args);
     return result.exitCode === 0;
 }
 
@@ -137,6 +172,7 @@ export {
     gitWorktreeAdd,
     gitWorktreeRemove,
     gitWorktreeListPorcelain,
+    parsePorcelainOutput,
     gitWorktreePrune,
     gitStatusCount,
     gitAheadBehind,
@@ -146,3 +182,4 @@ export {
     gitUnsetUpstream,
     gitRevParseGitDir,
 };
+export type { WorktreeEntry };

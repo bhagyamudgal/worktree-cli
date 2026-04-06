@@ -18,7 +18,7 @@ jobs:
             os: macos-latest
             bun_target: bun-darwin-arm64
           - target: darwin-x64
-            os: macos-13
+            os: macos-15
             bun_target: bun-darwin-x64
           - target: linux-x64
             os: ubuntu-latest

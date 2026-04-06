@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency install failure now warns and continues instead of aborting
 - Config parser now preserves whitespace in values and supports quoted values
 - Updated README with complete CLI options, list output details, safety features, dev commands, CI info, and release workflow
+- Reorder `git worktree add` arguments to match Git's documented synopsis
+- Abort remove command if force worktree removal fails instead of continuing to success path
+- Validate broken worktree against git registry before allowing deletion
+- Check `trash` subprocess exit code during worktree removal
+- Check `git branch -D` result before printing success message
+- Use `--expire now` with `git worktree prune` for immediate cleanup after manual deletion
+- Replace deprecated `macos-13` GitHub Actions runner with `macos-15`
+- Track `bun.lock` in git for reproducible CI builds with `--frozen-lockfile`
 
 ### Removed
 

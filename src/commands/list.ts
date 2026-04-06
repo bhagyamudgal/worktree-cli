@@ -4,39 +4,11 @@ import {
     getGitRoot,
     gitWorktreePrune,
     gitWorktreeListPorcelain,
+    parsePorcelainOutput,
     gitStatusCount,
     gitAheadBehind,
 } from "../lib/git";
 import { printHeader, printInfo, COLORS } from "../lib/logger";
-
-type WorktreeEntry = {
-    path: string;
-    branch: string;
-};
-
-function parsePorcelainOutput(output: string): WorktreeEntry[] {
-    const entries: WorktreeEntry[] = [];
-    let currentPath = "";
-    let currentBranch = "";
-
-    for (const line of output.split("\n")) {
-        if (line.startsWith("worktree ")) {
-            if (currentPath) {
-                entries.push({ path: currentPath, branch: currentBranch });
-            }
-            currentPath = line.slice("worktree ".length);
-            currentBranch = "";
-        } else if (line.startsWith("branch refs/heads/")) {
-            currentBranch = line.slice("branch refs/heads/".length);
-        }
-    }
-
-    if (currentPath) {
-        entries.push({ path: currentPath, branch: currentBranch });
-    }
-
-    return entries;
-}
 
 async function printWorktreeInfo(
     wtPath: string,

@@ -7,12 +7,15 @@ import {
     getGitRoot,
     gitStatusCount,
     gitWorktreeRemove,
+    gitWorktreeListPorcelain,
+    parsePorcelainOutput,
     gitWorktreePrune,
     gitBranchDelete,
     gitBranchShowCurrent,
     gitBranchList,
     gitRevParseGitDir,
 } from "../lib/git";
+import { run } from "../lib/shell";
 import { loadConfig } from "../lib/config";
 import { printSuccess, printError, printWarn, printInfo } from "../lib/logger";
 import { EXIT_CODES } from "../lib/constants";
@@ -22,6 +25,14 @@ async function confirmOrExit(message: string): Promise<void> {
     if (p.isCancel(confirmed) || !confirmed) {
         printInfo("Cancelled.");
         process.exit(EXIT_CODES.SUCCESS);
+    }
+}
+
+async function forceRemoveWorktree(worktreePath: string): Promise<void> {
+    const result = await gitWorktreeRemove(worktreePath, true);
+    if (!result.success) {
+        printError(result.output || "git worktree remove --force failed.");
+        process.exit(EXIT_CODES.ERROR);
     }
 }
 
@@ -85,18 +96,31 @@ export const removeCommand = command({
                     `Worktree '${opts.name}' has ${changes} uncommitted change(s).`
                 );
                 await confirmOrExit("Remove anyway?");
-                await gitWorktreeRemove(worktreePath, true);
+                await forceRemoveWorktree(worktreePath);
             } else {
                 const result = await gitWorktreeRemove(worktreePath);
                 if (!result.success) {
-                    printWarn(
-                        "Worktree has untracked files. Force removing..."
-                    );
+                    printWarn(result.output || "git worktree remove failed.");
                     await confirmOrExit("Continue?");
-                    await gitWorktreeRemove(worktreePath, true);
+                    await forceRemoveWorktree(worktreePath);
                 }
             }
         } else {
+            const porcelainOutput = await gitWorktreeListPorcelain();
+            const entries = parsePorcelainOutput(porcelainOutput);
+
+            const isRegistered = entries.some(
+                (entry) =>
+                    entry.path === resolvedPath || entry.path === worktreePath
+            );
+
+            if (!isRegistered) {
+                printError(
+                    `'${opts.name}' is not a registered git worktree. Aborting.`
+                );
+                process.exit(EXIT_CODES.ERROR);
+            }
+
             printWarn(
                 `Worktree '${opts.name}' has a broken git reference (repo may have been moved).`
             );
@@ -104,13 +128,24 @@ export const removeCommand = command({
 
             const hasTrash = Bun.which("trash") !== null;
             if (hasTrash) {
-                const proc = Bun.spawn(["trash", worktreePath]);
-                await proc.exited;
+                const trashResult = await run("trash", [worktreePath]);
+                if (trashResult.exitCode !== 0) {
+                    printError("Failed to move worktree to trash.");
+                    process.exit(EXIT_CODES.ERROR);
+                }
             } else {
-                await fs.rm(worktreePath, { recursive: true, force: true });
+                const { error: rmError } = await tryCatch(
+                    fs.rm(worktreePath, { recursive: true, force: true })
+                );
+                if (rmError) {
+                    printError(
+                        `Failed to remove worktree directory: ${rmError.message}`
+                    );
+                    process.exit(EXIT_CODES.ERROR);
+                }
             }
 
-            const pruneSuccess = await gitWorktreePrune();
+            const pruneSuccess = await gitWorktreePrune("now");
             if (!pruneSuccess) {
                 printWarn(
                     "  git worktree prune failed. Run 'git worktree prune' manually."
@@ -142,10 +177,14 @@ export const removeCommand = command({
 
             if (p.isCancel(confirmed) || !confirmed) return;
 
-            await gitBranchDelete(worktreeBranch, true);
-            printSuccess(
-                `Branch '${worktreeBranch}' force deleted (local only).`
-            );
+            const forceDeleted = await gitBranchDelete(worktreeBranch, true);
+            if (forceDeleted) {
+                printSuccess(
+                    `Branch '${worktreeBranch}' force deleted (local only).`
+                );
+            } else {
+                printError(`Failed to delete branch '${worktreeBranch}'.`);
+            }
         }
     },
 });
