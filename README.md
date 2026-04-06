@@ -17,7 +17,7 @@ chmod +x ~/.local/bin/worktree
 
 ## Setup
 
-Create a `.worktreerc` file at your repo root to set the default base branch:
+Create a `.worktreerc` file at your repo root and **commit it** so teammates get the same defaults:
 
 ```
 DEFAULT_BASE=origin/dev
@@ -84,5 +84,5 @@ Re-run the install command to get the latest version.
 ## Requirements
 
 - Git
-- Bash 4+
+- Bash 3+
 - macOS or Linux

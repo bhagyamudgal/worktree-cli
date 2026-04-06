@@ -187,6 +187,7 @@ cleanup_empty_parents() {
 cmd_create() {
     local name=""
     local base=""
+    local base_explicit=false
     local editor_flag=""
 
     while [[ $# -gt 0 ]]; do
@@ -194,6 +195,7 @@ cmd_create() {
             --base)
                 [[ $# -lt 2 ]] && { print_error "--base requires a branch name"; exit 1; }
                 base="$2"
+                base_explicit=true
                 shift 2
                 ;;
             --editor)
@@ -236,14 +238,14 @@ cmd_create() {
     echo ""
 
     echo -e "${CYAN}[1/5]${NC} Fetching latest remote refs..."
-    git fetch origin --prune 2>&1
+    git fetch origin --prune >/dev/null 2>&1
     print_success "  Remote refs updated."
     echo ""
 
     local is_tracking_remote=false
     if git rev-parse --verify "origin/$name" >/dev/null 2>&1; then
         is_tracking_remote=true
-        if [[ -n "$base" ]]; then
+        if [[ "$base_explicit" == "true" ]]; then
             print_warn "  --base '$base' ignored: remote branch 'origin/$name' exists and takes priority."
         fi
     else
@@ -567,7 +569,7 @@ show_help() {
     echo "  (omit)             Auto-detect, or prompt if both are available"
     echo ""
     print_header "Config (.worktreerc at repo root):"
-    echo "  DEFAULT_BASE=origin/dev    Override auto-detected base branch"
+    echo "  DEFAULT_BASE=origin/dev    Set default base branch for new worktrees"
     echo "  WORKTREE_DIR=.worktrees    Override worktree directory name"
     echo ""
     print_header "Examples:"
