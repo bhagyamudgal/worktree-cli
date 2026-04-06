@@ -8,12 +8,7 @@ Git worktree manager with automatic env file copying, dependency installation, a
 curl -fsSL https://raw.githubusercontent.com/bhagyamudgal/worktree-cli/main/install.sh | bash
 ```
 
-Or manually:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bhagyamudgal/worktree-cli/main/bin/worktree -o ~/.local/bin/worktree
-chmod +x ~/.local/bin/worktree
-```
+Or download the binary directly from [Releases](https://github.com/bhagyamudgal/worktree-cli/releases) and place it in your PATH.
 
 ## Setup
 
@@ -43,7 +38,7 @@ worktree remove feature-auth                    # remove worktree + cleanup bran
 
 ## What it does
 
-On `create`, the script:
+On `create`, the CLI:
 
 1. Fetches latest remote refs
 2. Creates a git worktree (tracks remote branch if it exists, otherwise branches from base)
@@ -81,8 +76,24 @@ Then use `gw create feature-auth`, `gw list`, etc.
 
 Re-run the install command to get the latest version.
 
-## Requirements
+## Platforms
 
-- Git
-- Bash 3+
-- macOS or Linux
+Pre-built binaries are available for:
+
+- macOS (Apple Silicon / Intel)
+- Linux (x64 / ARM64)
+
+## Development
+
+Requires [Bun](https://bun.sh).
+
+```bash
+bun install
+bun run dev -- help          # run locally
+bun run build                # compile standalone binary
+bun run typecheck            # type-check
+```
+
+## License
+
+MIT

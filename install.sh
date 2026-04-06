@@ -17,10 +17,37 @@ main() {
     echo -e "${BOLD}Installing worktree CLI...${NC}"
     echo ""
 
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    case "$ARCH" in
+        x86_64)        ARCH="x64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *)
+            echo -e "${RED}Unsupported architecture: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+
+    case "$OS" in
+        darwin|linux) ;;
+        *)
+            echo -e "${RED}Unsupported OS: $OS${NC}"
+            exit 1
+            ;;
+    esac
+
+    ASSET_NAME="worktree-${OS}-${ARCH}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+
     mkdir -p "$INSTALL_DIR"
 
-    echo -e "  Downloading from ${DIM}github.com/${REPO}${NC}..."
-    curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/bin/worktree" -o "${INSTALL_DIR}/${BINARY_NAME}"
+    echo -e "  Downloading ${DIM}${ASSET_NAME}${NC} from ${DIM}github.com/${REPO}${NC}..."
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "${INSTALL_DIR}/${BINARY_NAME}"; then
+        echo -e "${RED}Download failed.${NC}"
+        echo -e "  Check that a release exists at: ${DIM}https://github.com/${REPO}/releases${NC}"
+        exit 1
+    fi
     chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
     echo -e "  ${GREEN}Installed to ${INSTALL_DIR}/${BINARY_NAME}${NC}"
