@@ -238,8 +238,11 @@ cmd_create() {
     echo ""
 
     echo -e "${CYAN}[1/5]${NC} Fetching latest remote refs..."
-    git fetch origin --prune >/dev/null 2>&1
-    print_success "  Remote refs updated."
+    if git fetch origin --prune >/dev/null 2>&1; then
+        print_success "  Remote refs updated."
+    else
+        print_warn "  Fetch failed (network issue or ref conflict). Continuing with local refs..."
+    fi
     echo ""
 
     local is_tracking_remote=false
