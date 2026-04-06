@@ -10,21 +10,7 @@ const configSchema = z.object({
 
 type Config = z.infer<typeof configSchema>;
 
-async function loadConfig(root: string): Promise<Config> {
-    const configPath = path.join(root, ".worktreerc");
-    const file = Bun.file(configPath);
-    const isExists = await file.exists();
-
-    if (!isExists) {
-        return configSchema.parse({});
-    }
-
-    const { data: content, error } = await tryCatch(file.text());
-
-    if (error) {
-        return configSchema.parse({});
-    }
-
+function parseConfigContent(content: string): Record<string, string> {
     const raw: Record<string, string> = {};
     for (const line of content.split("\n")) {
         const trimmed = line.trim();
@@ -43,9 +29,31 @@ async function loadConfig(root: string): Promise<Config> {
         }
         raw[key] = value;
     }
+    return raw;
+}
 
+function validateConfig(raw: Record<string, string>): Config {
     return configSchema.parse(raw);
 }
 
-export { loadConfig };
+async function loadConfig(root: string): Promise<Config> {
+    const configPath = path.join(root, ".worktreerc");
+    const file = Bun.file(configPath);
+    const isExists = await file.exists();
+
+    if (!isExists) {
+        return configSchema.parse({});
+    }
+
+    const { data: content, error } = await tryCatch(file.text());
+
+    if (error) {
+        return configSchema.parse({});
+    }
+
+    const raw = parseConfigContent(content);
+    return configSchema.parse(raw);
+}
+
+export { loadConfig, parseConfigContent, validateConfig };
 export type { Config };
