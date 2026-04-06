@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKTREE_DIR=".worktrees"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+print_success() { echo -e "${GREEN}$1${NC}" >&2; }
+print_error() { echo -e "${RED}$1${NC}" >&2; }
+print_info() { echo -e "${BLUE}$1${NC}" >&2; }
+print_warn() { echo -e "${YELLOW}$1${NC}" >&2; }
+print_header() { echo -e "${BOLD}$1${NC}" >&2; }
+
+get_git_root() {
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+        print_error "Not inside a git repository."
+        exit 1
+    }
+    echo "$root"
+}
+
+get_default_base() {
+    local root="$1"
+
+    if [[ -n "${CONFIG_DEFAULT_BASE:-}" ]]; then
+        echo "$CONFIG_DEFAULT_BASE"
+        return
+    fi
+
+    print_error "No default base branch configured."
+    print_error "Create a .worktreerc file at your repo root with:"
+    print_error "  DEFAULT_BASE=origin/dev"
+    print_error "Or use --base <branch> to specify one."
+    exit 1
+}
+
+load_config() {
+    local root="$1"
+    local config_file="$root/.worktreerc"
+
+    if [[ -f "$config_file" ]]; then
+        local key value
+        while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            key=$(echo "$key" | tr -d '[:space:]')
+            value=$(echo "$value" | tr -d '[:space:]')
+            case "$key" in
+                DEFAULT_BASE) CONFIG_DEFAULT_BASE="$value" ;;
+                WORKTREE_DIR) WORKTREE_DIR="$value" ;;
+            esac
+        done < "$config_file"
+    fi
+}
+
+resolve_editor() {
+    local preferred="$1"
+
+    if [[ -n "$preferred" ]]; then
+        if ! command -v "$preferred" >/dev/null 2>&1; then
+            print_error "'$preferred' is not installed or not in PATH."
+            exit 1
+        fi
+        echo "$preferred"
+        return
+    fi
+
+    local has_code=false
+    local has_cursor=false
+    command -v code >/dev/null 2>&1 && has_code=true
+    command -v cursor >/dev/null 2>&1 && has_cursor=true
+
+    if $has_code && $has_cursor; then
+        echo "" >&2
+        print_info "Multiple editors detected:"
+        echo "  1) VS Code  (code)" >&2
+        echo "  2) Cursor   (cursor)" >&2
+        read -rp "Choose editor [1]: " choice
+        case "${choice:-1}" in
+            1) echo "code" ;;
+            2) echo "cursor" ;;
+            *) print_error "Invalid choice."; exit 1 ;;
+        esac
+    elif $has_code; then
+        echo "code"
+    elif $has_cursor; then
+        echo "cursor"
+    else
+        echo ""
+    fi
+}
+
+open_in_editor() {
+    local editor="$1"
+    local path="$2"
+
+    if [[ -z "$editor" ]]; then
+        print_warn "  No editor (code/cursor) found. Open manually: $path"
+        return
+    fi
+
+    local label="$editor"
+    [[ "$editor" == "code" ]] && label="VS Code"
+    [[ "$editor" == "cursor" ]] && label="Cursor"
+
+    "$editor" "$path"
+    print_success "  Opened in $label."
+}
+
+detect_package_manager() {
+    local root="$1"
+    if [[ -f "$root/pnpm-lock.yaml" ]]; then
+        echo "pnpm"
+    elif [[ -f "$root/yarn.lock" ]]; then
+        echo "yarn"
+    elif [[ -f "$root/package-lock.json" ]]; then
+        echo "npm"
+    elif [[ -f "$root/bun.lockb" ]] || [[ -f "$root/bun.lock" ]]; then
+        echo "bun"
+    else
+        echo ""
+    fi
+}
+
+find_env_files() {
+    local root="$1"
+    find "$root" \
+        -maxdepth 4 \
+        \( -name ".env" -o -name ".env.local" \) \
+        -not -path "*/node_modules/*" \
+        -not -path "*/.next/*" \
+        -not -path "*/$WORKTREE_DIR/*" \
+        -not -path "*/.claude/*" \
+        -not -path "*/dist/*" \
+        2>/dev/null | sort
+}
+
+copy_env_files() {
+    local root="$1"
+    local worktree_path="$2"
+    local env_files
+    local copied=0
+
+    env_files=$(find_env_files "$root")
+
+    if [[ -z "$env_files" ]]; then
+        print_warn "  No .env/.env.local files found to copy."
+        return
+    fi
+
+    while IFS= read -r env_file; do
+        local relative_path="${env_file#"$root"/}"
+        local target_dir
+        target_dir=$(dirname "$worktree_path/$relative_path")
+
+        mkdir -p "$target_dir"
+        cp "$env_file" "$worktree_path/$relative_path"
+        echo -e "  ${DIM}Copied${NC} $relative_path"
+        copied=$((copied + 1))
+    done <<< "$env_files"
+
+    print_success "  $copied env file(s) copied."
+}
+
+cleanup_empty_parents() {
+    local dir
+    dir=$(dirname "$1")
+    local stop_at="$2"
+
+    while [[ "$dir" != "$stop_at" ]] && [[ "$dir" == "$stop_at"/* ]] && [[ -d "$dir" ]]; do
+        if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+            rmdir "$dir"
+            dir=$(dirname "$dir")
+        else
+            break
+        fi
+    done
+}
+
+cmd_create() {
+    local name=""
+    local base=""
+    local editor_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base)
+                [[ $# -lt 2 ]] && { print_error "--base requires a branch name"; exit 1; }
+                base="$2"
+                shift 2
+                ;;
+            --editor)
+                [[ $# -lt 2 ]] && { print_error "--editor requires a value (code or cursor)"; exit 1; }
+                editor_flag="$2"
+                shift 2
+                ;;
+            -*)
+                print_error "Unknown option: $1"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$name" ]]; then
+        print_error "Usage: worktree create <name> [--base <branch>] [--editor <code|cursor>]"
+        exit 1
+    fi
+
+    local root
+    root=$(get_git_root)
+    load_config "$root"
+
+    if [[ -z "$base" ]]; then
+        base="${CONFIG_DEFAULT_BASE:-}"
+    fi
+
+    local worktree_path="$root/$WORKTREE_DIR/$name"
+
+    if [[ -d "$worktree_path" ]]; then
+        print_error "Worktree '$name' already exists at $worktree_path"
+        exit 1
+    fi
+
+    print_header "Creating worktree '$name'..."
+    echo ""
+
+    echo -e "${CYAN}[1/5]${NC} Fetching latest remote refs..."
+    git fetch origin --prune 2>&1
+    print_success "  Remote refs updated."
+    echo ""
+
+    local is_tracking_remote=false
+    if git rev-parse --verify "origin/$name" >/dev/null 2>&1; then
+        is_tracking_remote=true
+        if [[ -n "$base" ]]; then
+            print_warn "  --base '$base' ignored: remote branch 'origin/$name' exists and takes priority."
+        fi
+    else
+        if [[ -z "$base" ]]; then
+            base=$(get_default_base "$root")
+        fi
+
+        if ! git rev-parse --verify "$base" >/dev/null 2>&1; then
+            if ! git rev-parse --verify "origin/$base" >/dev/null 2>&1; then
+                print_error "Base branch '$base' not found locally or on origin."
+                exit 1
+            fi
+            base="origin/$base"
+        fi
+    fi
+
+    echo -e "${CYAN}[2/5]${NC} Creating git worktree..."
+    if [[ "$is_tracking_remote" == "true" ]]; then
+        git worktree add "$worktree_path" -B "$name" "origin/$name" 2>&1
+        print_success "  Tracking existing remote branch origin/$name"
+    else
+        git worktree add "$worktree_path" -B "$name" "$base" 2>&1
+        git -C "$worktree_path" branch --unset-upstream 2>/dev/null || true
+        print_success "  New branch '$name' created from $base (no upstream — push with -u to set)"
+    fi
+    echo ""
+
+    echo -e "${CYAN}[3/5]${NC} Copying env files..."
+    copy_env_files "$root" "$worktree_path"
+    echo ""
+
+    echo -e "${CYAN}[4/5]${NC} Installing dependencies..."
+    local pm
+    pm=$(detect_package_manager "$root")
+    if [[ -n "$pm" ]]; then
+        print_info "  Detected $pm, running $pm install..."
+        (cd "$worktree_path" && $pm install)
+        print_success "  Dependencies installed."
+    else
+        print_warn "  No lockfile found. Skipping dependency install."
+    fi
+    echo ""
+
+    echo -e "${CYAN}[5/5]${NC} Opening in editor..."
+    local editor
+    editor=$(resolve_editor "$editor_flag")
+    open_in_editor "$editor" "$worktree_path"
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Done!${NC}"
+    echo -e "  Path:   ${BOLD}$worktree_path${NC}"
+    echo -e "  Branch: ${BOLD}$name${NC}"
+    if [[ "$is_tracking_remote" == "true" ]]; then
+        echo -e "  Source: ${DIM}origin/$name (existing remote branch)${NC}"
+    else
+        echo -e "  Base:   ${DIM}$base${NC}"
+    fi
+    echo ""
+    echo -e "  ${DIM}cd $worktree_path${NC}"
+}
+
+cmd_list() {
+    local root
+    root=$(get_git_root)
+    load_config "$root"
+
+    git worktree prune 2>/dev/null || true
+
+    local worktrees
+    worktrees=$(git worktree list --porcelain)
+
+    if [[ -z "$worktrees" ]]; then
+        print_info "No worktrees found."
+        return
+    fi
+
+    echo ""
+    print_header "Active Worktrees"
+    echo -e "${DIM}──────────────────────────────────────────────────────${NC}"
+
+    local current_path=""
+    local current_branch=""
+    local is_first=true
+
+    while IFS= read -r line; do
+        if [[ "$line" == worktree\ * ]]; then
+            if [[ -n "$current_path" ]] && [[ "$is_first" != "true" ]]; then
+                print_worktree_info "$current_path" "$current_branch" "$root"
+            fi
+            current_path="${line#worktree }"
+            current_branch=""
+            is_first=false
+        elif [[ "$line" == branch\ * ]]; then
+            current_branch="${line#branch refs/heads/}"
+        fi
+    done <<< "$worktrees"
+
+    if [[ -n "$current_path" ]] && [[ "$is_first" != "true" ]]; then
+        print_worktree_info "$current_path" "$current_branch" "$root"
+    fi
+
+    echo ""
+}
+
+print_worktree_info() {
+    local wt_path="$1"
+    local branch="$2"
+    local root="$3"
+
+    local relative_path="${wt_path#"$root"/}"
+    if [[ "$wt_path" == "$root" ]]; then
+        relative_path=". (main)"
+    fi
+
+    local changes=0
+    local ahead=0
+    local behind=0
+
+    if [[ -d "$wt_path" ]]; then
+        changes=$(git -C "$wt_path" status --porcelain -uno 2>/dev/null | wc -l | tr -d ' ')
+
+        local upstream
+        upstream=$(git -C "$wt_path" rev-parse --abbrev-ref "@{upstream}" 2>/dev/null || echo "")
+        if [[ -n "$upstream" ]]; then
+            local ab
+            ab=$(git -C "$wt_path" rev-list --left-right --count HEAD..."$upstream" 2>/dev/null || echo "0	0")
+            ahead=$(echo "$ab" | cut -f1)
+            behind=$(echo "$ab" | cut -f2)
+        fi
+    fi
+
+    echo -e "  ${BOLD}$relative_path${NC}"
+    echo -e "    Branch:  ${CYAN}${branch:-detached}${NC}"
+
+    local status_parts=()
+    if [[ "$changes" -gt 0 ]]; then
+        status_parts+=("${YELLOW}${changes} changed${NC}")
+    fi
+    if [[ "$ahead" -gt 0 ]]; then
+        status_parts+=("${GREEN}${ahead} ahead${NC}")
+    fi
+    if [[ "$behind" -gt 0 ]]; then
+        status_parts+=("${RED}${behind} behind${NC}")
+    fi
+
+    if [[ ${#status_parts[@]} -gt 0 ]]; then
+        local IFS=", "
+        echo -e "    Status:  ${status_parts[*]}"
+    else
+        echo -e "    Status:  ${DIM}clean${NC}"
+    fi
+
+    echo -e "${DIM}──────────────────────────────────────────────────────${NC}"
+}
+
+cmd_open() {
+    local name=""
+    local editor_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --editor)
+                [[ $# -lt 2 ]] && { print_error "--editor requires a value (code or cursor)"; exit 1; }
+                editor_flag="$2"
+                shift 2
+                ;;
+            -*)
+                print_error "Unknown option: $1"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$name" ]]; then
+        print_error "Usage: worktree open <name> [--editor <code|cursor>]"
+        exit 1
+    fi
+
+    local root
+    root=$(get_git_root)
+    load_config "$root"
+    local worktree_path="$root/$WORKTREE_DIR/$name"
+
+    if [[ ! -d "$worktree_path" ]]; then
+        print_error "Worktree '$name' not found at $worktree_path"
+        exit 1
+    fi
+
+    local editor
+    editor=$(resolve_editor "$editor_flag")
+    open_in_editor "$editor" "$worktree_path"
+}
+
+cmd_remove() {
+    local name="$1"
+
+    if [[ -z "$name" ]]; then
+        print_error "Usage: worktree remove <name>"
+        exit 1
+    fi
+
+    local root
+    root=$(get_git_root)
+    load_config "$root"
+    local worktree_base="$root/$WORKTREE_DIR"
+    local worktree_path="$worktree_base/$name"
+
+    if [[ ! -d "$worktree_path" ]]; then
+        print_error "Worktree '$name' not found at $worktree_path"
+        exit 1
+    fi
+
+    local resolved_path resolved_base
+    resolved_path=$(cd "$worktree_path" && pwd -P)
+    resolved_base=$(cd "$worktree_base" && pwd -P)
+
+    if [[ "$resolved_path" != "$resolved_base"/* ]]; then
+        print_error "Path '$name' resolves outside the worktree directory. Aborting."
+        exit 1
+    fi
+
+    local is_valid_worktree=true
+    local worktree_branch=""
+    if ! git -C "$worktree_path" rev-parse --git-dir >/dev/null 2>&1; then
+        is_valid_worktree=false
+    else
+        worktree_branch=$(git -C "$worktree_path" branch --show-current 2>/dev/null || echo "")
+    fi
+
+    if [[ "$is_valid_worktree" == "true" ]]; then
+        local changes
+        changes=$(git -C "$worktree_path" status --porcelain -uno 2>/dev/null | wc -l | tr -d ' ')
+
+        if [[ "$changes" -gt 0 ]]; then
+            print_warn "Worktree '$name' has $changes uncommitted change(s)."
+            read -rp "Remove anyway? (y/N): " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                print_info "Cancelled."
+                exit 0
+            fi
+            git worktree remove "$worktree_path" --force
+        elif ! git worktree remove "$worktree_path" 2>/dev/null; then
+            print_warn "Worktree has untracked files. Force removing..."
+            read -rp "Continue? (y/N): " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                print_info "Cancelled."
+                exit 0
+            fi
+            git worktree remove "$worktree_path" --force
+        fi
+    else
+        print_warn "Worktree '$name' has a broken git reference (repo may have been moved)."
+        read -rp "Force remove directory? (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            print_info "Cancelled."
+            exit 0
+        fi
+        if command -v trash >/dev/null 2>&1; then
+            trash "$worktree_path"
+        else
+            rm -rf "$worktree_path"
+        fi
+        if ! git worktree prune 2>&1; then
+            print_warn "  git worktree prune failed. Run 'git worktree prune' manually."
+        fi
+    fi
+
+    print_success "Worktree '$name' removed."
+
+    cleanup_empty_parents "$worktree_path" "$worktree_base"
+
+    if [[ -z "$worktree_branch" ]]; then
+        print_info "No branch to clean up (detached HEAD or broken worktree)."
+        return
+    fi
+
+    local branch_exists
+    branch_exists=$(git branch --list "$worktree_branch" 2>/dev/null)
+    if [[ -z "$branch_exists" ]]; then
+        return
+    fi
+
+    if git branch -d "$worktree_branch" 2>/dev/null; then
+        print_success "Branch '$worktree_branch' deleted (local only)."
+    else
+        read -rp "Delete local branch '$worktree_branch'? (not fully merged) (y/N): " force_delete
+        if [[ "$force_delete" == "y" || "$force_delete" == "Y" ]]; then
+            git branch -D "$worktree_branch"
+            print_success "Branch '$worktree_branch' force deleted (local only)."
+        fi
+    fi
+}
+
+show_help() {
+    echo ""
+    print_header "worktree — Git worktree manager"
+    echo ""
+    echo "  Manages git worktrees with automatic env file copying,"
+    echo "  dependency installation, and editor integration (VS Code / Cursor)."
+    echo ""
+    echo "  If origin/<name> exists, create will track the remote branch"
+    echo "  automatically (--base is ignored). Otherwise, a new branch is"
+    echo "  created from the base configured in .worktreerc (or --base)."
+    echo ""
+    print_header "Commands:"
+    echo "  create <name> [--base <branch>] [--editor <code|cursor>]"
+    echo "                                     Create a new worktree"
+    echo "  open <name> [--editor <code|cursor>]"
+    echo "                                     Open an existing worktree in editor"
+    echo "  list                               List all worktrees with status"
+    echo "  remove <name>                      Remove a worktree"
+    echo "  help                               Show this help"
+    echo ""
+    print_header "Editor Selection:"
+    echo "  --editor code      Use VS Code"
+    echo "  --editor cursor    Use Cursor"
+    echo "  (omit)             Auto-detect, or prompt if both are available"
+    echo ""
+    print_header "Config (.worktreerc at repo root):"
+    echo "  DEFAULT_BASE=origin/dev    Override auto-detected base branch"
+    echo "  WORKTREE_DIR=.worktrees    Override worktree directory name"
+    echo ""
+    print_header "Examples:"
+    echo "  worktree create feature-auth                    # uses .worktreerc base"
+    echo "  worktree create feature-auth --editor code"
+    echo "  worktree create bugfix-123 --base main"
+    echo "  worktree create colleague/feature-xyz           # tracks remote if exists"
+    echo "  worktree open feature-auth"
+    echo "  worktree open feature-auth --editor cursor"
+    echo "  worktree list"
+    echo "  worktree remove feature-auth"
+    echo ""
+}
+
+CONFIG_DEFAULT_BASE=""
+
+case "${1:-help}" in
+    create)
+        shift
+        cmd_create "$@"
+        ;;
+    open)
+        shift
+        cmd_open "$@"
+        ;;
+    list)
+        cmd_list
+        ;;
+    remove)
+        shift
+        cmd_remove "${1:-}"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        print_error "Unknown command: $1"
+        show_help
+        exit 1
+        ;;
+esac
