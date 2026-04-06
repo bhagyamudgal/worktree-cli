@@ -32,8 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Check `trash` subprocess exit code during worktree removal
 - Check `git branch -D` result before printing success message
 - Use `--expire now` with `git worktree prune` for immediate cleanup after manual deletion
-- Replace deprecated `macos-13` GitHub Actions runner with `macos-15`
+- Replace deprecated `macos-13` GitHub Actions runner with `macos-15-intel`
 - Track `bun.lock` in git for reproducible CI builds with `--frozen-lockfile`
+- Filter worktree list by root path instead of assuming index order
+- Validate `--editor` flag against supported editor allowlist before spawning
+- Handle env file copy failures per file instead of aborting entire flow
+- Reorder `git worktree remove` arguments to match Git's documented synopsis
 
 ### Removed
 

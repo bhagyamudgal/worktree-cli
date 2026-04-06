@@ -62,8 +62,18 @@ async function copyEnvFiles(
         const targetPath = path.join(worktreePath, relativePath);
         const targetDir = path.dirname(targetPath);
 
-        await fs.mkdir(targetDir, { recursive: true });
-        await fs.copyFile(envFile, targetPath);
+        const { error } = await tryCatch(
+            (async () => {
+                await fs.mkdir(targetDir, { recursive: true });
+                await fs.copyFile(envFile, targetPath);
+            })()
+        );
+
+        if (error) {
+            printWarn(`  Failed to copy ${relativePath}: ${error.message}`);
+            continue;
+        }
+
         console.error(`  ${COLORS.DIM}Copied${COLORS.RESET} ${relativePath}`);
         copied++;
     }

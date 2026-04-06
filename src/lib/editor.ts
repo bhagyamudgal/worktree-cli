@@ -13,6 +13,12 @@ function isEditorAvailable(editor: string): boolean {
 
 async function resolveEditor(preferred?: string): Promise<string | null> {
     if (preferred) {
+        if (!SUPPORTED_EDITORS.includes(preferred as EditorChoice)) {
+            printError(
+                `Unsupported editor '${preferred}'. Use one of: ${SUPPORTED_EDITORS.join(", ")}.`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
         if (!isEditorAvailable(preferred)) {
             printError(`'${preferred}' is not installed or not in PATH.`);
             process.exit(EXIT_CODES.ERROR);

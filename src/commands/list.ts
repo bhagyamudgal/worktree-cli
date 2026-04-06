@@ -57,7 +57,7 @@ export const listCommand = command({
         }
 
         const entries = parsePorcelainOutput(output);
-        const worktreeEntries = entries.slice(1);
+        const worktreeEntries = entries.filter((entry) => entry.path !== root);
 
         if (worktreeEntries.length === 0) {
             printInfo("No additional worktrees found.");

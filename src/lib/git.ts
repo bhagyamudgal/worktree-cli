@@ -46,8 +46,9 @@ async function gitWorktreeRemove(
     path: string,
     force?: boolean
 ): Promise<{ success: boolean; output: string }> {
-    const args = ["worktree", "remove", path];
+    const args = ["worktree", "remove"];
     if (force) args.push("--force");
+    args.push(path);
     const result = await run("git", args);
     return {
         success: result.exitCode === 0,
