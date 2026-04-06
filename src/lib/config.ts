@@ -20,6 +20,7 @@ function parseConfigContent(content: string): Record<string, string> {
         if (eqIndex === -1) continue;
 
         const key = trimmed.slice(0, eqIndex).trim();
+        if (key === "") continue;
         let value = trimmed.slice(eqIndex + 1).trim();
         if (
             (value.startsWith('"') && value.endsWith('"')) ||

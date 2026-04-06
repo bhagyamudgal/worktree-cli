@@ -66,11 +66,12 @@ main() {
     echo ""
 
     SHELL_CONFIG=""
-    if [ -f "${HOME}/.zshrc" ]; then
-        SHELL_CONFIG="${HOME}/.zshrc"
-    elif [ -f "${HOME}/.bashrc" ]; then
-        SHELL_CONFIG="${HOME}/.bashrc"
-    elif [ -f "${HOME}/.bash_profile" ]; then
+    CURRENT_SHELL="$(basename "${SHELL:-}")"
+    case "$CURRENT_SHELL" in
+        zsh)  [ -f "${HOME}/.zshrc" ] && SHELL_CONFIG="${HOME}/.zshrc" ;;
+        bash) [ -f "${HOME}/.bashrc" ] && SHELL_CONFIG="${HOME}/.bashrc" ;;
+    esac
+    if [ -z "$SHELL_CONFIG" ] && [ -f "${HOME}/.bash_profile" ]; then
         SHELL_CONFIG="${HOME}/.bash_profile"
     fi
 

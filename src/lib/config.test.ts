@@ -56,6 +56,11 @@ describe("parseConfigContent", () => {
         const result = parseConfigContent("  DEFAULT_BASE  =  origin/dev  ");
         expect(result).toEqual({ DEFAULT_BASE: "origin/dev" });
     });
+
+    it("skips lines with empty keys", () => {
+        const result = parseConfigContent("=value\nDEFAULT_BASE=origin/dev");
+        expect(result).toEqual({ DEFAULT_BASE: "origin/dev" });
+    });
 });
 
 describe("validateConfig", () => {

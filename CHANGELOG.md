@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Auto-create `.worktrees/.gitignore` with `*` on first worktree create, so users never need to manually update their root `.gitignore`
-- Unit tests for config parsing, git output parsing, and env file discovery using `bun:test`
+- Automated test suite for configuration loading, worktree operations, and environment file handling
 - Shell alias suggestion (`gw=worktree`) in install script, with automatic shell config detection
 - Interactive worktree selection for `open` and `remove` commands when name is omitted
 

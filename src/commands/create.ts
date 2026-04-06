@@ -11,6 +11,7 @@ import {
 import { loadConfig } from "../lib/config";
 import { resolveEditor, openInEditor } from "../lib/editor";
 import { copyEnvFiles } from "../lib/env-files";
+import { tryCatch } from "../lib/try-catch";
 import {
     detectPackageManager,
     installDependencies,
@@ -42,12 +43,22 @@ export const createCommand = command({
 
         const worktreeBaseDir = path.join(root, config.WORKTREE_DIR);
         const gitignorePath = path.join(worktreeBaseDir, ".gitignore");
-        await fs.mkdir(worktreeBaseDir, { recursive: true });
-        await fs.writeFile(gitignorePath, "*\n", { flag: "wx" }).catch((e) => {
-            if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
-                printWarn("  Could not create .worktrees/.gitignore.");
-            }
-        });
+        const { error: mkdirError } = await tryCatch(
+            fs.mkdir(worktreeBaseDir, { recursive: true })
+        );
+        if (mkdirError) {
+            printWarn(`  Could not create ${config.WORKTREE_DIR} directory.`);
+        } else {
+            await fs
+                .writeFile(gitignorePath, "*\n", { flag: "wx" })
+                .catch((e) => {
+                    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+                        printWarn(
+                            `  Could not create ${config.WORKTREE_DIR}/.gitignore.`
+                        );
+                    }
+                });
+        }
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);
         if (dirExists) {

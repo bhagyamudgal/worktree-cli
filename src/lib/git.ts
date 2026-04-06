@@ -1,7 +1,7 @@
 import * as p from "@clack/prompts";
 import path from "node:path";
 import { run } from "./shell";
-import { printError } from "./logger";
+import { printError, printWarn } from "./logger";
 import { EXIT_CODES } from "./constants";
 import { tryCatch } from "./try-catch";
 
@@ -172,7 +172,12 @@ async function selectWorktree(
     root: string,
     worktreeDir: string
 ): Promise<string> {
-    await gitWorktreePrune();
+    const pruneSuccess = await gitWorktreePrune();
+    if (!pruneSuccess) {
+        printWarn(
+            "git worktree prune failed. Listing may include stale entries."
+        );
+    }
 
     const output = await gitWorktreeListPorcelain();
     if (!output) {
