@@ -14,6 +14,7 @@ import {
     gitBranchShowCurrent,
     gitBranchList,
     gitRevParseGitDir,
+    selectWorktree,
 } from "../lib/git";
 import { run } from "../lib/shell";
 import { loadConfig } from "../lib/config";
@@ -51,17 +52,18 @@ export const removeCommand = command({
     name: "remove",
     desc: "Remove a worktree",
     options: {
-        name: positional("name").desc("Worktree name").required(),
+        name: positional("name").desc("Worktree name (interactive if omitted)"),
     },
     handler: async (opts) => {
         const root = await getGitRoot();
         const config = await loadConfig(root);
+        const name = opts.name ?? (await selectWorktree(root));
         const worktreeBase = path.join(root, config.WORKTREE_DIR);
-        const worktreePath = path.join(worktreeBase, opts.name);
+        const worktreePath = path.join(worktreeBase, name);
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);
         if (!dirExists) {
-            printError(`Worktree '${opts.name}' not found at ${worktreePath}`);
+            printError(`Worktree '${name}' not found at ${worktreePath}`);
             process.exit(EXIT_CODES.ERROR);
         }
 
@@ -79,7 +81,7 @@ export const removeCommand = command({
 
         if (!resolvedPath.startsWith(resolvedBase + path.sep)) {
             printError(
-                `Path '${opts.name}' resolves outside the worktree directory. Aborting.`
+                `Path '${name}' resolves outside the worktree directory. Aborting.`
             );
             process.exit(EXIT_CODES.ERROR);
         }
@@ -93,7 +95,7 @@ export const removeCommand = command({
 
             if (changes > 0) {
                 printWarn(
-                    `Worktree '${opts.name}' has ${changes} uncommitted change(s).`
+                    `Worktree '${name}' has ${changes} uncommitted change(s).`
                 );
                 await confirmOrExit("Remove anyway?");
                 await forceRemoveWorktree(worktreePath);
@@ -116,13 +118,13 @@ export const removeCommand = command({
 
             if (!isRegistered) {
                 printError(
-                    `'${opts.name}' is not a registered git worktree. Aborting.`
+                    `'${name}' is not a registered git worktree. Aborting.`
                 );
                 process.exit(EXIT_CODES.ERROR);
             }
 
             printWarn(
-                `Worktree '${opts.name}' has a broken git reference (repo may have been moved).`
+                `Worktree '${name}' has a broken git reference (repo may have been moved).`
             );
             await confirmOrExit("Force remove directory?");
 
@@ -153,7 +155,7 @@ export const removeCommand = command({
             }
         }
 
-        printSuccess(`Worktree '${opts.name}' removed.`);
+        printSuccess(`Worktree '${name}' removed.`);
 
         await cleanupEmptyParents(worktreePath, worktreeBase);
 

@@ -1,7 +1,7 @@
 import { command, positional, string } from "@drizzle-team/brocli";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { getGitRoot } from "../lib/git";
+import { getGitRoot, selectWorktree } from "../lib/git";
 import { loadConfig } from "../lib/config";
 import { resolveEditor, openInEditor } from "../lib/editor";
 import { printError } from "../lib/logger";
@@ -11,18 +11,20 @@ export const openCommand = command({
     name: "open",
     desc: "Open an existing worktree in editor",
     options: {
-        name: positional("name").desc("Worktree name").required(),
+        name: positional("name").desc("Worktree name (interactive if omitted)"),
         editor: string("editor").desc("Editor to open (code or cursor)"),
     },
     handler: async (opts) => {
         const root = await getGitRoot();
         const config = await loadConfig(root);
-        const worktreePath = path.join(root, config.WORKTREE_DIR, opts.name);
+
+        const name = opts.name ?? (await selectWorktree(root));
+        const worktreePath = path.join(root, config.WORKTREE_DIR, name);
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);
 
         if (!dirExists) {
-            printError(`Worktree '${opts.name}' not found at ${worktreePath}`);
+            printError(`Worktree '${name}' not found at ${worktreePath}`);
             process.exit(EXIT_CODES.ERROR);
         }
 
