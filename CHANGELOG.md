@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automated test suite for configuration loading, worktree operations, and environment file handling
 - Shell alias suggestion (`gw=worktree`) in install script, with automatic shell config detection
 - Interactive worktree selection for `open` and `remove` commands when name is omitted
+- `update` command to self-update the CLI to the latest GitHub release
 
 ### Changed
 
