@@ -23,10 +23,27 @@ function getAssetName(): string {
     return `worktree-${platform}-${arch}`;
 }
 
+type ReleaseAsset = {
+    name: string;
+    browser_download_url: string;
+};
+
 export const updateCommand = command({
     name: "update",
     desc: "Update worktree CLI to the latest version",
     handler: async () => {
+        const isStandalone =
+            Bun.main.startsWith("/$bunfs/") ||
+            import.meta.url.includes("$bunfs/");
+
+        if (!isStandalone) {
+            printError(
+                "Update is only available for standalone compiled binaries."
+            );
+            printError("Run from the installed binary, not via bun run.");
+            process.exit(EXIT_CODES.ERROR);
+        }
+
         const currentVersion = pkg.version;
         const binaryPath = process.execPath;
 
@@ -56,7 +73,8 @@ export const updateCommand = command({
             jsonError ||
             !release ||
             typeof release !== "object" ||
-            typeof release.tag_name !== "string"
+            typeof release.tag_name !== "string" ||
+            !Array.isArray(release.assets)
         ) {
             printError("Failed to parse release data.");
             process.exit(EXIT_CODES.ERROR);
@@ -93,12 +111,20 @@ export const updateCommand = command({
         }
 
         const assetName = getAssetName();
-        const downloadUrl = `https://github.com/${REPO}/releases/download/v${latestVersion}/${assetName}`;
+        const asset = (release.assets as ReleaseAsset[]).find(
+            (entry) => entry.name === assetName
+        );
+        if (!asset) {
+            printError(
+                `Release ${release.tag_name} is missing asset ${assetName}.`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
 
         printInfo(`Downloading ${assetName}...`);
 
         const { data: downloadResponse, error: dlError } = await tryCatch(
-            fetch(downloadUrl)
+            fetch(asset.browser_download_url)
         );
         if (dlError || !downloadResponse || !downloadResponse.ok) {
             printError(`Failed to download ${assetName}.`);
