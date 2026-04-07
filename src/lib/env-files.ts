@@ -81,4 +81,4 @@ async function copyEnvFiles(
     printSuccess(`  ${copied} env file(s) copied.`);
 }
 
-export { copyEnvFiles };
+export { copyEnvFiles, findEnvFiles };

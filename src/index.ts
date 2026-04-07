@@ -3,9 +3,10 @@ import { createCommand } from "./commands/create";
 import { listCommand } from "./commands/list";
 import { openCommand } from "./commands/open";
 import { removeCommand } from "./commands/remove";
+import { updateCommand } from "./commands/update";
 import pkg from "../package.json";
 
-run([createCommand, listCommand, openCommand, removeCommand], {
+run([createCommand, listCommand, openCommand, removeCommand, updateCommand], {
     name: "worktree",
     description: pkg.description ?? "Git worktree manager",
     version: pkg.version,

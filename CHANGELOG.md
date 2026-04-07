@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Auto-create `.worktrees/.gitignore` with `*` on first worktree create, so users never need to manually update their root `.gitignore`
+- Automated test suite for configuration loading, worktree operations, and environment file handling
+- Shell alias suggestion (`gw=worktree`) in install script, with automatic shell config detection
+- Interactive worktree selection for `open` and `remove` commands when name is omitted
+- `update` command to self-update the CLI to the latest GitHub release
+
+### Changed
+
+- `open` and `remove` commands: `name` argument is now optional (shows interactive selector when omitted)
+
 ## [1.0.0] - 2026-04-06
 
 ### Added

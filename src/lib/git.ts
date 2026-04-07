@@ -1,5 +1,7 @@
+import * as p from "@clack/prompts";
+import path from "node:path";
 import { run } from "./shell";
-import { printError } from "./logger";
+import { printError, printWarn } from "./logger";
 import { EXIT_CODES } from "./constants";
 import { tryCatch } from "./try-catch";
 
@@ -166,6 +168,72 @@ async function gitRevParseGitDir(cwd: string): Promise<boolean> {
     return result.exitCode === 0;
 }
 
+async function selectWorktree(
+    root: string,
+    worktreeDir: string
+): Promise<string> {
+    const pruneSuccess = await gitWorktreePrune();
+    if (!pruneSuccess) {
+        printWarn(
+            "git worktree prune failed. Listing may include stale entries."
+        );
+    }
+
+    const output = await gitWorktreeListPorcelain();
+    if (!output) {
+        printError(
+            "No worktrees found. Create one with: worktree create <name>"
+        );
+        process.exit(EXIT_CODES.ERROR);
+    }
+
+    const worktreeBase = path.join(root, worktreeDir);
+    const entries = parsePorcelainOutput(output);
+    const worktreeEntries = entries.filter(
+        (entry) =>
+            entry.path !== root &&
+            entry.path.startsWith(worktreeBase + path.sep)
+    );
+
+    if (worktreeEntries.length === 0) {
+        printError(
+            "No worktrees found. Create one with: worktree create <name>"
+        );
+        process.exit(EXIT_CODES.ERROR);
+    }
+
+    const options = await Promise.all(
+        worktreeEntries.map(async (entry) => {
+            const [changes, { ahead, behind }] = await Promise.all([
+                gitStatusCount(entry.path),
+                gitAheadBehind(entry.path),
+            ]);
+
+            const parts: string[] = [];
+            if (changes > 0)
+                parts.push(`${changes} change${changes > 1 ? "s" : ""}`);
+            if (ahead > 0) parts.push(`${ahead} ahead`);
+            if (behind > 0) parts.push(`${behind} behind`);
+            const hint = parts.length > 0 ? parts.join(", ") : "clean";
+
+            const name = path.relative(worktreeBase, entry.path);
+            return { value: name, label: entry.branch || name, hint };
+        })
+    );
+
+    const selected = await p.select({
+        message: "Select a worktree",
+        options,
+    });
+
+    if (p.isCancel(selected)) {
+        process.exit(EXIT_CODES.SUCCESS);
+    }
+
+    // p.select returns string | symbol, but isCancel above exits on symbol — library types don't narrow
+    return selected as string;
+}
+
 export {
     getGitRoot,
     gitFetch,
@@ -182,5 +250,6 @@ export {
     gitBranchList,
     gitUnsetUpstream,
     gitRevParseGitDir,
+    selectWorktree,
 };
 export type { WorktreeEntry };
