@@ -23,10 +23,18 @@ describe("compareVersions", () => {
         expect(compareVersions("1.0", "1.0.1")).toBeLessThan(0);
     });
 
-    it("treats prerelease tags on the patch as equal to the base patch", () => {
-        expect(compareVersions("1.2.3-beta", "1.2.3")).toBe(0);
-        expect(compareVersions("1.2.3-beta.1", "1.2.3-beta.2")).toBe(0);
+    it("treats prerelease tags as less than the base version (SemVer 2.0)", () => {
+        expect(compareVersions("1.2.3-beta", "1.2.3")).toBeLessThan(0);
+        expect(compareVersions("1.2.3", "1.2.3-beta")).toBeGreaterThan(0);
         expect(compareVersions("1.2.3-rc.1", "1.2.4")).toBeLessThan(0);
+    });
+
+    it("orders prerelease tags lexicographically", () => {
+        expect(compareVersions("1.2.3-beta.1", "1.2.3-beta.2")).toBeLessThan(0);
+        expect(compareVersions("1.2.3-rc.1", "1.2.3-beta.1")).toBeGreaterThan(
+            0
+        );
+        expect(compareVersions("1.2.3-alpha", "1.2.3-alpha")).toBe(0);
     });
 
     it("never returns NaN for garbage input", () => {

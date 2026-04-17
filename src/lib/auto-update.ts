@@ -8,23 +8,20 @@ import {
     fetchLatestRelease,
     fetchSha256Sums,
     getAssetName,
+    isStandalone,
     verifyBinaryHash,
 } from "./release";
 import { tryCatch, tryCatchSync } from "./try-catch";
-import { COLORS } from "./constants";
+import { COLORS } from "./logger";
 import pkg from "../../package.json";
 
 const STAGING_FILENAME = ".worktree.next";
 const VERSION_SIDECAR_FILENAME = ".worktree.next.version";
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 2_000;
+const MAX_ERROR_LOG_BYTES = 64 * 1024;
+const ERROR_LOG_KEEP_LINES = 20;
 const INTERNAL_CHECK_SUBCOMMAND = "__internal_update_check";
-
-function isStandalone(): boolean {
-    return (
-        Bun.main.startsWith("/$bunfs/") || import.meta.url.includes("$bunfs/")
-    );
-}
 
 function getBinaryDir(): string {
     return path.dirname(process.execPath);
@@ -58,9 +55,26 @@ function appendLastError(kind: "apply" | "check", message: string): void {
     try {
         ensureCacheDir();
         const line = `${new Date().toISOString()} ${kind}: ${message}\n`;
-        fs.appendFileSync(getLastErrorPath(), line);
+        const logPath = getLastErrorPath();
+        rotateErrorLogIfOversized(logPath);
+        fs.appendFileSync(logPath, line);
     } catch {
         // never let the error log itself block anything
+    }
+}
+
+function rotateErrorLogIfOversized(logPath: string): void {
+    try {
+        const stat = fs.statSync(logPath);
+        if (stat.size <= MAX_ERROR_LOG_BYTES) return;
+        const existing = fs.readFileSync(logPath, "utf8");
+        const lines = existing.split("\n").filter(function (line) {
+            return line !== "";
+        });
+        const kept = lines.slice(-ERROR_LOG_KEEP_LINES).join("\n") + "\n";
+        fs.writeFileSync(logPath, kept);
+    } catch {
+        // best-effort rotation — if stat/read/write fails, fall through
     }
 }
 
@@ -128,11 +142,10 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
             now - lastCheck < TWENTY_FOUR_HOURS_MS;
         if (shouldSkip) return;
 
-        // Best-effort throttle: two simultaneous launches may both check.
-        // Accepted trade-off — worst case is 2 API calls within the anon 60/hr limit.
-        ensureCacheDir();
-        fs.writeFileSync(getLastCheckPath(), String(now));
-
+        // Parent does NOT write last-check; the child writes it after a
+        // successful check completes. Simultaneous launches may both spawn
+        // (accepted trade-off — worst case 2 API calls within the anon 60/hr
+        // limit) but a failed check never burns the 24h window.
         Bun.spawn({
             cmd: [process.execPath, INTERNAL_CHECK_SUBCOMMAND],
             stdio: ["ignore", "ignore", "ignore"],
@@ -142,6 +155,16 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
         }).unref();
     } catch {
         // never block the user's command
+    }
+}
+
+function recordCheckCompleted(): void {
+    const { error } = tryCatchSync(function () {
+        ensureCacheDir();
+        fs.writeFileSync(getLastCheckPath(), String(Date.now()));
+    });
+    if (error) {
+        appendLastError("check", `last-check write: ${error.message}`);
     }
 }
 
@@ -162,7 +185,10 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         return;
     }
 
-    if (compareVersions(pkg.version, release.version) >= 0) return;
+    if (compareVersions(pkg.version, release.version) >= 0) {
+        recordCheckCompleted();
+        return;
+    }
 
     const asset = release.assets.find(function (entry) {
         return entry.name === assetName;
@@ -227,7 +253,7 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         return;
     }
 
-    const probe = probeBinaryVersion(tmpPath);
+    const probe = probeBinaryRuns(tmpPath);
     if (!probe.ok) {
         safeUnlink(tmpPath);
         appendLastError("check", `probe: ${probe.reason}`);
@@ -243,42 +269,37 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         return;
     }
 
-    tryCatchSync(function () {
-        fs.writeFileSync(getVersionSidecarPath(), probe.version);
+    const { error: sidecarError } = tryCatchSync(function () {
+        fs.writeFileSync(getVersionSidecarPath(), release.version);
     });
-}
-
-type ProbeResult =
-    | { ok: true; version: string }
-    | { ok: false; reason: string };
-
-function probeBinaryVersion(filePath: string): ProbeResult {
-    let result;
-    try {
-        result = Bun.spawnSync({
-            cmd: [filePath, "--version"],
-            stdout: "pipe",
-            stderr: "pipe",
-            timeout: PROBE_TIMEOUT_MS,
-        });
-    } catch (error) {
-        return {
-            ok: false,
-            reason: error instanceof Error ? error.message : String(error),
-        };
+    if (sidecarError) {
+        appendLastError("check", `sidecar: ${sidecarError.message}`);
     }
 
+    recordCheckCompleted();
+}
+
+type ProbeResult = { ok: true } | { ok: false; reason: string };
+
+function probeBinaryRuns(filePath: string): ProbeResult {
+    const { data: result, error } = tryCatchSync(function () {
+        return Bun.spawnSync({
+            cmd: [filePath, "--version"],
+            stdout: "ignore",
+            stderr: "ignore",
+            timeout: PROBE_TIMEOUT_MS,
+        });
+    });
+    if (error || !result) {
+        return {
+            ok: false,
+            reason: error?.message ?? "spawn failed",
+        };
+    }
     if (result.exitCode !== 0) {
         return { ok: false, reason: `exit ${result.exitCode}` };
     }
-
-    const stdout = result.stdout.toString("utf8");
-    const stderr = result.stderr.toString("utf8");
-    const match = /v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/.exec(
-        stdout + "\n" + stderr
-    );
-    if (!match) return { ok: false, reason: "no version in --version output" };
-    return { ok: true, version: match[1] };
+    return { ok: true };
 }
 
 function safeUnlink(filePath: string): void {

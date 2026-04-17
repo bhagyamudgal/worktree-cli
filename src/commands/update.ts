@@ -10,14 +10,9 @@ import {
     fetchLatestRelease,
     fetchSha256Sums,
     getAssetName,
+    isStandalone,
     verifyBinaryHash,
 } from "../lib/release";
-
-function isStandaloneBinary(): boolean {
-    return (
-        Bun.main.startsWith("/$bunfs/") || import.meta.url.includes("$bunfs/")
-    );
-}
 
 function isEaccesError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
@@ -25,11 +20,16 @@ function isEaccesError(error: unknown): boolean {
     return (error as NodeJS.ErrnoException).code === "EACCES";
 }
 
+// Best-effort cleanup — the primary error is surfaced by the caller.
+async function safeUnlink(filePath: string): Promise<void> {
+    await fs.unlink(filePath).catch(function () {});
+}
+
 export const updateCommand = command({
     name: "update",
     desc: "Update worktree CLI to the latest version",
     handler: async () => {
-        if (!isStandaloneBinary()) {
+        if (!isStandalone()) {
             printError(
                 "Update is only available for standalone compiled binaries."
             );
@@ -90,14 +90,14 @@ export const updateCommand = command({
             downloadAsset(asset, tmpPath)
         );
         if (dlError) {
-            await fs.unlink(tmpPath).catch(function () {});
+            await safeUnlink(tmpPath);
             printError(dlError.message);
             process.exit(EXIT_CODES.ERROR);
         }
 
         const { error: chmodError } = await tryCatch(fs.chmod(tmpPath, 0o755));
         if (chmodError) {
-            await fs.unlink(tmpPath).catch(function () {});
+            await safeUnlink(tmpPath);
             printError(
                 `Failed to mark binary executable: ${chmodError.message}`
             );
@@ -106,7 +106,7 @@ export const updateCommand = command({
 
         const sums = await fetchSha256Sums(release.assets);
         if (sums.kind === "error") {
-            await fs.unlink(tmpPath).catch(function () {});
+            await safeUnlink(tmpPath);
             printError(
                 `SHA256SUMS is published but could not be fetched: ${sums.reason}. Refusing to install.`
             );
@@ -115,7 +115,7 @@ export const updateCommand = command({
         if (sums.kind === "ok") {
             const expected = sums.sums[assetName];
             if (!expected) {
-                await fs.unlink(tmpPath).catch(function () {});
+                await safeUnlink(tmpPath);
                 printError(
                     `SHA256SUMS is missing an entry for ${assetName}; refusing to install.`
                 );
@@ -123,7 +123,7 @@ export const updateCommand = command({
             }
             const ok = await verifyBinaryHash(tmpPath, expected);
             if (!ok) {
-                await fs.unlink(tmpPath).catch(function () {});
+                await safeUnlink(tmpPath);
                 printError(
                     `Hash mismatch for ${assetName}; refusing to install.`
                 );
@@ -140,7 +140,7 @@ export const updateCommand = command({
             fs.rename(tmpPath, binaryPath)
         );
         if (renameError) {
-            await fs.unlink(tmpPath).catch(function () {});
+            await safeUnlink(tmpPath);
             if (isEaccesError(renameError)) {
                 printError("Permission denied. Try: sudo worktree update");
             } else {

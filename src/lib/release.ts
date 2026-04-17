@@ -17,6 +17,12 @@ type ReleaseInfo = {
     assets: ReleaseAsset[];
 };
 
+function isStandalone(): boolean {
+    return (
+        Bun.main.startsWith("/$bunfs/") || import.meta.url.includes("$bunfs/")
+    );
+}
+
 function getAssetName(): string | null {
     const platform = process.platform;
     const arch = process.arch;
@@ -33,20 +39,44 @@ function parseNumericSegment(raw: string | undefined): number {
     return Number.isFinite(n) ? n : 0;
 }
 
-function compareVersions(a: string, b: string): number {
-    const parse = function (v: string): [number, number, number] {
-        const [maj, min, patch] = v.replace(/^v/, "").split(".");
-        return [
-            parseNumericSegment(maj),
-            parseNumericSegment(min),
-            parseNumericSegment(patch),
-        ];
+type ParsedVersion = {
+    major: number;
+    minor: number;
+    patch: number;
+    prerelease: string | null;
+};
+
+function parseVersion(v: string): ParsedVersion {
+    const stripped = v.replace(/^v/, "");
+    const dashIndex = stripped.indexOf("-");
+    const core = dashIndex === -1 ? stripped : stripped.slice(0, dashIndex);
+    const prerelease =
+        dashIndex === -1 ? null : stripped.slice(dashIndex + 1) || null;
+    const [maj, min, patch] = core.split(".");
+    return {
+        major: parseNumericSegment(maj),
+        minor: parseNumericSegment(min),
+        patch: parseNumericSegment(patch),
+        prerelease,
     };
-    const [aMaj, aMin, aPatch] = parse(a);
-    const [bMaj, bMin, bPatch] = parse(b);
-    if (aMaj !== bMaj) return aMaj - bMaj;
-    if (aMin !== bMin) return aMin - bMin;
-    return aPatch - bPatch;
+}
+
+function comparePrerelease(a: string | null, b: string | null): number {
+    if (a === b) return 0;
+    if (a === null) return 1;
+    if (b === null) return -1;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+function compareVersions(a: string, b: string): number {
+    const pa = parseVersion(a);
+    const pb = parseVersion(b);
+    if (pa.major !== pb.major) return pa.major - pb.major;
+    if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+    if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+    return comparePrerelease(pa.prerelease, pb.prerelease);
 }
 
 function isReleaseInfo(value: unknown): value is {
@@ -143,9 +173,14 @@ async function verifyBinaryHash(
 ): Promise<boolean> {
     const hasher = new Bun.CryptoHasher("sha256");
     const file = Bun.file(filePath);
-    const { data: buffer, error } = await tryCatch(file.arrayBuffer());
-    if (error || !buffer) return false;
-    hasher.update(buffer);
+    const { error } = await tryCatch(
+        (async function () {
+            for await (const chunk of file.stream()) {
+                hasher.update(chunk);
+            }
+        })()
+    );
+    if (error) return false;
     const actual = hasher.digest("hex");
     return constantTimeEquals(
         actual.toLowerCase(),
@@ -208,12 +243,13 @@ function parseSha256Sums(text: string): Record<string, string> {
 }
 
 export {
-    getAssetName,
     compareVersions,
-    fetchLatestRelease,
     downloadAsset,
-    verifyBinaryHash,
+    fetchLatestRelease,
     fetchSha256Sums,
+    getAssetName,
+    isStandalone,
     parseSha256Sums,
+    verifyBinaryHash,
 };
 export type { ReleaseAsset, ReleaseInfo, Sha256SumsResult };

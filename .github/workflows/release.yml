@@ -24,7 +24,7 @@ jobs:
             os: ubuntu-latest
             bun_target: bun-linux-x64
           - target: linux-arm64
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             bun_target: bun-linux-arm64
 
     steps:
@@ -65,8 +65,7 @@ jobs:
           file dist/worktree-${{ matrix.target }}
           ls -lh dist/worktree-${{ matrix.target }}
 
-      - name: Smoke-test --version (native targets only)
-        if: matrix.target != 'linux-arm64'
+      - name: Smoke-test --version
         run: |
           chmod +x dist/worktree-${{ matrix.target }}
           ./dist/worktree-${{ matrix.target }} --version
