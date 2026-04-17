@@ -224,7 +224,9 @@ async function checkMergedIntoOrigin(
         { cwd }
     );
 
-    return result.exitCode === 0;
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    return null;
 }
 
 function formatBranchStatusHint(status: BranchStatus): string {
