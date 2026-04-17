@@ -72,6 +72,13 @@ type WorktreeEntry = {
     branch: string;
 };
 
+type BranchStatus = {
+    changes: number;
+    ahead: number;
+    behind: number;
+    isMerged: boolean | null;
+};
+
 function parsePorcelainOutput(output: string): WorktreeEntry[] {
     const entries: WorktreeEntry[] = [];
     let currentPath = "";
@@ -104,7 +111,9 @@ async function gitWorktreePrune(expire?: string): Promise<boolean> {
 }
 
 async function gitStatusCount(cwd: string): Promise<number> {
-    const result = await run("git", ["status", "--porcelain"], { cwd });
+    const result = await run("git", ["status", "--porcelain=v2", "-uall"], {
+        cwd,
+    });
     if (result.exitCode !== 0 || result.stdout === "") return 0;
     return result.stdout.split("\n").filter(Boolean).length;
 }
@@ -168,9 +177,69 @@ async function gitRevParseGitDir(cwd: string): Promise<boolean> {
     return result.exitCode === 0;
 }
 
+async function getDefaultBranch(configBase?: string): Promise<string | null> {
+    if (configBase) return configBase;
+
+    const result = await run("git", [
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+    ]);
+
+    if (result.exitCode !== 0 || result.stdout === "") return null;
+
+    const prefix = "refs/remotes/origin/";
+    return result.stdout.startsWith(prefix)
+        ? result.stdout.slice(prefix.length)
+        : result.stdout;
+}
+
+async function gitBranchStatus(
+    cwd: string,
+    defaultBranch: string | null
+): Promise<BranchStatus> {
+    const [changes, { ahead, behind }, isMerged] = await Promise.all([
+        gitStatusCount(cwd),
+        gitAheadBehind(cwd),
+        checkMergedIntoOrigin(cwd, defaultBranch),
+    ]);
+
+    return { changes, ahead, behind, isMerged };
+}
+
+async function checkMergedIntoOrigin(
+    cwd: string,
+    defaultBranch: string | null
+): Promise<boolean | null> {
+    if (!defaultBranch) return null;
+
+    const result = await run(
+        "git",
+        ["merge-base", "--is-ancestor", "HEAD", `origin/${defaultBranch}`],
+        { cwd }
+    );
+
+    return result.exitCode === 0;
+}
+
+function formatBranchStatusHint(status: BranchStatus): string {
+    const parts: string[] = [];
+    if (status.changes > 0)
+        parts.push(`${status.changes} change${status.changes > 1 ? "s" : ""}`);
+    if (status.ahead > 0) parts.push(`${status.ahead} ahead`);
+    if (status.behind > 0) parts.push(`${status.behind} behind`);
+    const localHint = parts.length > 0 ? parts.join(", ") : "clean";
+
+    let mergeHint = "";
+    if (status.isMerged === true) mergeHint = "merged";
+    else if (status.isMerged === false) mergeHint = "not merged";
+
+    return mergeHint ? `${localHint} | ${mergeHint}` : localHint;
+}
+
 async function selectWorktree(
     root: string,
-    worktreeDir: string
+    worktreeDir: string,
+    defaultBranch?: string | null
 ): Promise<string> {
     const pruneSuccess = await gitWorktreePrune();
     if (!pruneSuccess) {
@@ -204,18 +273,11 @@ async function selectWorktree(
 
     const options = await Promise.all(
         worktreeEntries.map(async (entry) => {
-            const [changes, { ahead, behind }] = await Promise.all([
-                gitStatusCount(entry.path),
-                gitAheadBehind(entry.path),
-            ]);
-
-            const parts: string[] = [];
-            if (changes > 0)
-                parts.push(`${changes} change${changes > 1 ? "s" : ""}`);
-            if (ahead > 0) parts.push(`${ahead} ahead`);
-            if (behind > 0) parts.push(`${behind} behind`);
-            const hint = parts.length > 0 ? parts.join(", ") : "clean";
-
+            const status = await gitBranchStatus(
+                entry.path,
+                defaultBranch ?? null
+            );
+            const hint = formatBranchStatusHint(status);
             const name = path.relative(worktreeBase, entry.path);
             return { value: name, label: entry.branch || name, hint };
         })
@@ -243,13 +305,14 @@ export {
     gitWorktreeListPorcelain,
     parsePorcelainOutput,
     gitWorktreePrune,
-    gitStatusCount,
-    gitAheadBehind,
     gitBranchDelete,
     gitBranchShowCurrent,
     gitBranchList,
     gitUnsetUpstream,
     gitRevParseGitDir,
+    getDefaultBranch,
+    gitBranchStatus,
+    formatBranchStatusHint,
     selectWorktree,
 };
-export type { WorktreeEntry };
+export type { WorktreeEntry, BranchStatus };

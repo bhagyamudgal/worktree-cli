@@ -1,41 +1,49 @@
 import { command } from "@drizzle-team/brocli";
 import path from "node:path";
+import type { BranchStatus } from "../lib/git";
 import {
     getGitRoot,
     gitWorktreePrune,
     gitWorktreeListPorcelain,
     parsePorcelainOutput,
-    gitStatusCount,
-    gitAheadBehind,
+    gitBranchStatus,
+    getDefaultBranch,
 } from "../lib/git";
+import { loadConfig } from "../lib/config";
 import { printHeader, printInfo, COLORS } from "../lib/logger";
 
-async function printWorktreeInfo(
+function printWorktreeInfo(
     wtPath: string,
     branch: string,
-    root: string
-): Promise<void> {
+    root: string,
+    status: BranchStatus
+): void {
     const { BOLD, CYAN, YELLOW, GREEN, RED, DIM, RESET } = COLORS;
 
     let relativePath = path.relative(root, wtPath);
     if (wtPath === root) relativePath = ". (main)";
 
-    const changes = await gitStatusCount(wtPath);
-    const { ahead, behind } = await gitAheadBehind(wtPath);
-
     console.error(`  ${BOLD}${relativePath}${RESET}`);
     console.error(`    Branch:  ${CYAN}${branch || "detached"}${RESET}`);
 
     const statusParts: string[] = [];
-    if (changes > 0) statusParts.push(`${YELLOW}${changes} changed${RESET}`);
-    if (ahead > 0) statusParts.push(`${GREEN}${ahead} ahead${RESET}`);
-    if (behind > 0) statusParts.push(`${RED}${behind} behind${RESET}`);
+    if (status.changes > 0)
+        statusParts.push(`${YELLOW}${status.changes} changed${RESET}`);
+    if (status.ahead > 0)
+        statusParts.push(`${GREEN}${status.ahead} ahead${RESET}`);
+    if (status.behind > 0)
+        statusParts.push(`${RED}${status.behind} behind${RESET}`);
 
-    if (statusParts.length > 0) {
-        console.error(`    Status:  ${statusParts.join(", ")}`);
-    } else {
-        console.error(`    Status:  ${DIM}clean${RESET}`);
-    }
+    const localStatus =
+        statusParts.length > 0 ? statusParts.join(", ") : `${DIM}clean${RESET}`;
+
+    let mergeStatus = "";
+    if (status.isMerged === true)
+        mergeStatus = `  |  ${GREEN}origin: merged${RESET}`;
+    else if (status.isMerged === false)
+        mergeStatus = `  |  ${YELLOW}origin: not merged${RESET}`;
+
+    console.error(`    Status:  ${localStatus}${mergeStatus}`);
 
     console.error(
         `${DIM}──────────────────────────────────────────────────────${RESET}`
@@ -47,6 +55,7 @@ export const listCommand = command({
     desc: "List all worktrees with status",
     handler: async () => {
         const root = await getGitRoot();
+        const config = await loadConfig(root);
 
         await gitWorktreePrune();
 
@@ -64,14 +73,23 @@ export const listCommand = command({
             return;
         }
 
+        const defaultBranch = await getDefaultBranch(config.DEFAULT_BASE);
+
+        const rows = await Promise.all(
+            worktreeEntries.map(async (entry) => ({
+                entry,
+                status: await gitBranchStatus(entry.path, defaultBranch),
+            }))
+        );
+
         console.error("");
         printHeader("Active Worktrees");
         console.error(
             `${COLORS.DIM}──────────────────────────────────────────────────────${COLORS.RESET}`
         );
 
-        for (const entry of worktreeEntries) {
-            await printWorktreeInfo(entry.path, entry.branch, root);
+        for (const { entry, status } of rows) {
+            printWorktreeInfo(entry.path, entry.branch, root, status);
         }
 
         console.error("");
