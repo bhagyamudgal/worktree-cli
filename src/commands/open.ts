@@ -1,7 +1,7 @@
 import { command, positional, string } from "@drizzle-team/brocli";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { getGitRoot, selectWorktree } from "../lib/git";
+import { getGitRoot, getDefaultBranch, selectWorktree } from "../lib/git";
 import { loadConfig } from "../lib/config";
 import { resolveEditor, openInEditor } from "../lib/editor";
 import { printError } from "../lib/logger";
@@ -18,8 +18,10 @@ export const openCommand = command({
         const root = await getGitRoot();
         const config = await loadConfig(root);
 
+        const defaultBranch = await getDefaultBranch(config.DEFAULT_BASE);
         const name =
-            opts.name ?? (await selectWorktree(root, config.WORKTREE_DIR));
+            opts.name ??
+            (await selectWorktree(root, config.WORKTREE_DIR, defaultBranch));
         const worktreePath = path.join(root, config.WORKTREE_DIR, name);
 
         const dirExists = await fs.stat(worktreePath).catch(() => null);

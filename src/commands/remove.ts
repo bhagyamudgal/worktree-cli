@@ -5,7 +5,9 @@ import * as p from "@clack/prompts";
 import { tryCatch } from "../lib/try-catch";
 import {
     getGitRoot,
-    gitStatusCount,
+    gitFetch,
+    gitBranchStatus,
+    getDefaultBranch,
     gitWorktreeRemove,
     gitWorktreeListPorcelain,
     parsePorcelainOutput,
@@ -57,8 +59,18 @@ export const removeCommand = command({
     handler: async (opts) => {
         const root = await getGitRoot();
         const config = await loadConfig(root);
+
+        const [fetchResult, defaultBranch] = await Promise.all([
+            gitFetch(),
+            getDefaultBranch(config.DEFAULT_BASE),
+        ]);
+        if (!fetchResult.success)
+            printWarn(
+                "Could not fetch from origin. Merge status may be stale."
+            );
         const name =
-            opts.name ?? (await selectWorktree(root, config.WORKTREE_DIR));
+            opts.name ??
+            (await selectWorktree(root, config.WORKTREE_DIR, defaultBranch));
         const worktreeBase = path.join(root, config.WORKTREE_DIR);
         const worktreePath = path.join(worktreeBase, name);
 
@@ -91,20 +103,38 @@ export const removeCommand = command({
         let worktreeBranch = "";
 
         if (isValidWorktree) {
-            worktreeBranch = await gitBranchShowCurrent(worktreePath);
-            const changes = await gitStatusCount(worktreePath);
+            const [branch, status] = await Promise.all([
+                gitBranchShowCurrent(worktreePath),
+                gitBranchStatus(worktreePath, defaultBranch),
+            ]);
+            worktreeBranch = branch;
 
-            if (changes > 0) {
+            if (status.changes > 0)
                 printWarn(
-                    `Worktree '${name}' has ${changes} uncommitted change(s).`
+                    `Worktree '${name}' has ${status.changes} uncommitted change(s).`
                 );
-                await confirmOrExit("Remove anyway?");
+            if (status.ahead > 0)
+                printWarn(
+                    `Worktree '${name}' has ${status.ahead} unpushed commit(s).`
+                );
+
+            if (status.isMerged === true)
+                printSuccess(
+                    `Branch is merged into ${defaultBranch} on origin.`
+                );
+            else if (status.isMerged === false)
+                printWarn(
+                    `Branch is NOT merged into ${defaultBranch} on origin.`
+                );
+
+            await confirmOrExit(`Remove worktree '${name}'?`);
+
+            if (status.changes > 0) {
                 await forceRemoveWorktree(worktreePath);
             } else {
                 const result = await gitWorktreeRemove(worktreePath);
                 if (!result.success) {
                     printWarn(result.output || "git worktree remove failed.");
-                    await confirmOrExit("Continue?");
                     await forceRemoveWorktree(worktreePath);
                 }
             }

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-17
+
+### Added
+
+- Origin merge status displayed in `list`, `open`, and `remove` commands — shows whether branch is merged into default branch on origin
+- Full branch status in `remove` command — shows uncommitted changes, unpushed commits, and origin merge status before confirming removal
+- Auto-detect default branch from `origin/HEAD` when `DEFAULT_BASE` is not set in `.worktreerc`
+
+### Changed
+
+- `remove` command always confirms before removal, displaying comprehensive branch status
+- `remove` command fetches from origin before checking merge status (non-fatal on failure)
+- Worktree selection hint now shows origin merge status alongside local changes
+
+### Fixed
+
+- Inaccurate file counts: switched from `git status --porcelain` to `--porcelain=v2 -uall` to expand untracked directories into individual files
+- `DEFAULT_BASE=origin/main` (the documented format) no longer produces an invalid `origin/origin/main` ref in the merge check — `getDefaultBranch` now strips a leading `origin/` so all consumers see a bare branch name
+- `checkMergedIntoOrigin` now distinguishes "not an ancestor" (exit code 1 → `false`) from ref-missing / corrupt-state errors (other non-zero → `null` = unknown), avoiding misleading "NOT merged" messages on error states
+
 ## [1.1.0] - 2026-04-07
 
 ### Added
