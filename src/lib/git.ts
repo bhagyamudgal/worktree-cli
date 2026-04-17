@@ -178,7 +178,13 @@ async function gitRevParseGitDir(cwd: string): Promise<boolean> {
 }
 
 async function getDefaultBranch(configBase?: string): Promise<string | null> {
-    if (configBase) return configBase;
+    const ORIGIN_PREFIX = "origin/";
+
+    if (configBase) {
+        return configBase.startsWith(ORIGIN_PREFIX)
+            ? configBase.slice(ORIGIN_PREFIX.length)
+            : configBase;
+    }
 
     const result = await run("git", [
         "symbolic-ref",
@@ -187,9 +193,9 @@ async function getDefaultBranch(configBase?: string): Promise<string | null> {
 
     if (result.exitCode !== 0 || result.stdout === "") return null;
 
-    const prefix = "refs/remotes/origin/";
-    return result.stdout.startsWith(prefix)
-        ? result.stdout.slice(prefix.length)
+    const REF_PREFIX = "refs/remotes/origin/";
+    return result.stdout.startsWith(REF_PREFIX)
+        ? result.stdout.slice(REF_PREFIX.length)
         : result.stdout;
 }
 
