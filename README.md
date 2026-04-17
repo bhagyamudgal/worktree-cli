@@ -81,7 +81,27 @@ Then use `gw create feature-auth`, `gw list`, etc.
 
 ## Update
 
-Re-run the install command to get the latest version.
+### Automatic
+
+Once installed, `worktree` checks GitHub for a newer release at most once every 24 hours, in the background. When a newer version is found, it is downloaded, verified against a SHA256 hash, and staged. The **next** time you invoke `worktree`, the binary is swapped atomically and the command runs against the new version — you'll see a one-line note on stderr.
+
+To disable, create `~/.worktreerc` with:
+
+```
+AUTO_UPDATE=false
+```
+
+Or set `WORKTREE_NO_UPDATE=1` in your environment (useful in CI).
+
+Auto-update is a no-op when running via `bun run dev` or in any non-standalone invocation.
+
+### Manual
+
+```bash
+worktree update
+```
+
+Forces an immediate check + download + replace, bypassing the 24-hour throttle. Requires write permission to the binary location (use `sudo` if installed under `/usr/local/bin`).
 
 ## Platforms
 

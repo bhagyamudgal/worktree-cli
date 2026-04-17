@@ -1,11 +1,35 @@
 import { z } from "zod";
+import os from "node:os";
+import path from "node:path";
 import { DEFAULT_WORKTREE_DIR } from "./constants";
 import { tryCatch } from "./try-catch";
-import path from "node:path";
+
+const booleanLike = z
+    .union([z.boolean(), z.string()])
+    .transform(function (value) {
+        if (typeof value === "boolean") return value;
+        const normalized = value.trim().toLowerCase();
+        if (
+            normalized === "true" ||
+            normalized === "1" ||
+            normalized === "yes"
+        ) {
+            return true;
+        }
+        if (
+            normalized === "false" ||
+            normalized === "0" ||
+            normalized === "no"
+        ) {
+            return false;
+        }
+        throw new Error(`Expected boolean-like value, got "${value}"`);
+    });
 
 const configSchema = z.object({
     DEFAULT_BASE: z.string().optional(),
     WORKTREE_DIR: z.string().default(DEFAULT_WORKTREE_DIR),
+    AUTO_UPDATE: booleanLike.default(true),
 });
 
 type Config = z.infer<typeof configSchema>;
@@ -37,24 +61,28 @@ function validateConfig(raw: Record<string, string>): Config {
     return configSchema.parse(raw);
 }
 
-async function loadConfig(root: string): Promise<Config> {
-    const configPath = path.join(root, ".worktreerc");
-    const file = Bun.file(configPath);
+async function readConfigFile(filePath: string): Promise<Config> {
+    const file = Bun.file(filePath);
     const isExists = await file.exists();
-
-    if (!isExists) {
-        return validateConfig({});
-    }
-
+    if (!isExists) return validateConfig({});
     const { data: content, error } = await tryCatch(file.text());
-
-    if (error) {
-        return validateConfig({});
-    }
-
-    const raw = parseConfigContent(content);
-    return validateConfig(raw);
+    if (error) return validateConfig({});
+    const { data: parsed, error: parseError } = await tryCatch(
+        Promise.resolve().then(function () {
+            return validateConfig(parseConfigContent(content));
+        })
+    );
+    if (parseError || !parsed) return validateConfig({});
+    return parsed;
 }
 
-export { loadConfig, parseConfigContent, validateConfig };
+async function loadConfig(root: string): Promise<Config> {
+    return readConfigFile(path.join(root, ".worktreerc"));
+}
+
+async function loadGlobalConfig(): Promise<Config> {
+    return readConfigFile(path.join(os.homedir(), ".worktreerc"));
+}
+
+export { loadConfig, loadGlobalConfig, parseConfigContent, validateConfig };
 export type { Config };

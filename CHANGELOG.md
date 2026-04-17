@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-17
+
+### Added
+
+- **Background auto-update**: on launch, `worktree` checks GitHub for a newer release at most once every 24 hours in a detached background process. When a newer version is found, the binary is downloaded, verified against SHA256, and staged. The next invocation atomically swaps in the new binary and prints a one-line `worktree auto-updated to vX.Y.Z` note on stderr. Opt out via `AUTO_UPDATE=false` in `~/.worktreerc` or `WORKTREE_NO_UPDATE=1` in the environment.
+- **Release integrity**: every GitHub Release now publishes a `SHA256SUMS` file. The `worktree update` command and the background auto-updater both verify the downloaded binary against this hash before installing. Releases without `SHA256SUMS` (legacy) still work but without verification.
+
+### Changed
+
+- CI: bumped `actions/checkout`, `actions/upload-artifact`, and `actions/download-artifact` to latest majors (Node.js 24 runtime) to address GitHub's deprecation of Node.js 20 actions
+- Release binaries now built with `--minify --sourcemap=none` and stripped of debug symbols (`llvm-strip` on Linux, `strip` on macOS). Binary sizes are slightly smaller; functional behavior unchanged.
+- Release workflow smoke-tests each built binary via `--version` before publishing to catch regressions.
+
+### Fixed
+
+- macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** in the release workflow after stripping. Prior releases shipped unsigned binaries, which Apple Silicon (arm64) macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
+
 ## [1.2.0] - 2026-04-17
 
 ### Added
