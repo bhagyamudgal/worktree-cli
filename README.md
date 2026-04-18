@@ -62,12 +62,13 @@ On `remove`, it:
 
 ## Config
 
-The `.worktreerc` file supports:
+The `.worktreerc` file (in the repo root for project settings, in `~/` for user settings) supports:
 
 | Key | Description | Example |
 |-----|-------------|---------|
 | `DEFAULT_BASE` | Default base branch for new worktrees | `origin/dev` |
 | `WORKTREE_DIR` | Directory name for worktrees (default: `.worktrees`) | `.worktrees` |
+| `AUTO_UPDATE` | Enable background auto-update checks in `~/.worktreerc` only (default: `true`) | `false` |
 
 ## Alias
 
@@ -87,7 +88,7 @@ Once installed, `worktree` checks GitHub for a newer release at most once every 
 
 To disable, create `~/.worktreerc` with:
 
-```
+```ini
 AUTO_UPDATE=false
 ```
 

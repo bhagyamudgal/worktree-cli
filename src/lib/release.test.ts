@@ -29,12 +29,20 @@ describe("compareVersions", () => {
         expect(compareVersions("1.2.3-rc.1", "1.2.4")).toBeLessThan(0);
     });
 
-    it("orders prerelease tags lexicographically", () => {
+    it("orders prerelease tags lexicographically (NOT strict SemVer)", () => {
         expect(compareVersions("1.2.3-beta.1", "1.2.3-beta.2")).toBeLessThan(0);
         expect(compareVersions("1.2.3-rc.1", "1.2.3-beta.1")).toBeGreaterThan(
             0
         );
         expect(compareVersions("1.2.3-alpha", "1.2.3-alpha")).toBe(0);
+    });
+
+    it("compares numeric prerelease segments as strings (rc.10 < rc.2)", () => {
+        // Intentional non-strict-SemVer: "rc.10" sorts before "rc.2" by
+        // lexicographic string compare. Strict SemVer 2.0 §11 would order
+        // numeric segments numerically (rc.2 < rc.10). If prereleases ever
+        // start shipping from this repo, revisit.
+        expect(compareVersions("1.2.3-rc.10", "1.2.3-rc.2")).toBeLessThan(0);
     });
 
     it("never returns NaN for garbage input", () => {
@@ -56,8 +64,8 @@ describe("parseSha256Sums", () => {
         expect(result["worktree-linux-x64"]).toBe("b".repeat(64));
     });
 
-    it("parses BSD-style asterisk prefix", () => {
-        const text = "c".repeat(64) + "  *worktree-darwin-x64";
+    it("parses BSD-style asterisk prefix (shasum -b)", () => {
+        const text = "c".repeat(64) + " *worktree-darwin-x64";
         const result = parseSha256Sums(text);
         expect(result["worktree-darwin-x64"]).toBe("c".repeat(64));
     });

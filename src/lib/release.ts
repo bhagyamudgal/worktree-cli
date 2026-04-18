@@ -223,7 +223,10 @@ async function fetchSha256Sums(
         };
     }
     const { data: text, error: textError } = await tryCatch(response.text());
-    if (textError || !text) {
+    if (textError) {
+        return { kind: "error", reason: textError.message };
+    }
+    if (!text) {
         return { kind: "error", reason: "empty SHA256SUMS body" };
     }
     return { kind: "ok", sums: parseSha256Sums(text) };

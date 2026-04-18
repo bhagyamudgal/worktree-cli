@@ -12,7 +12,7 @@ import {
 } from "./lib/auto-update";
 import pkg from "../package.json";
 
-if (!process.argv.slice(2).includes(INTERNAL_CHECK_SUBCOMMAND)) {
+if (process.argv[2] !== INTERNAL_CHECK_SUBCOMMAND) {
     applyPendingUpdate();
     void scheduleBackgroundUpdateCheck();
 }

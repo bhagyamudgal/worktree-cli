@@ -66,13 +66,23 @@ async function readConfigFile(filePath: string): Promise<Config> {
     const isExists = await file.exists();
     if (!isExists) return validateConfig({});
     const { data: content, error } = await tryCatch(file.text());
-    if (error) return validateConfig({});
+    if (error) {
+        console.error(
+            `warning: could not read ${filePath}: ${error.message}. Using defaults.`
+        );
+        return validateConfig({});
+    }
     const { data: parsed, error: parseError } = await tryCatch(
         Promise.resolve().then(function () {
             return validateConfig(parseConfigContent(content));
         })
     );
-    if (parseError || !parsed) return validateConfig({});
+    if (parseError || !parsed) {
+        console.error(
+            `warning: ${filePath} is invalid: ${parseError?.message ?? "unknown"}. Using defaults.`
+        );
+        return validateConfig({});
+    }
     return parsed;
 }
 

@@ -288,6 +288,10 @@ function probeBinaryRuns(filePath: string): ProbeResult {
             stdout: "ignore",
             stderr: "ignore",
             timeout: PROBE_TIMEOUT_MS,
+            // Disable auto-update in the probe child — otherwise its top-level
+            // scheduleBackgroundUpdateCheck could spawn a grandchild if the
+            // 24h throttle has expired.
+            env: { ...process.env, WORKTREE_NO_UPDATE: "1" },
         });
     });
     if (error || !result) {
