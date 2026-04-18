@@ -5,6 +5,7 @@ import { loadGlobalConfig } from "./config";
 import { safeUnlinkSync } from "./fs-utils";
 import {
     compareVersions,
+    computeSha256Sync,
     downloadAsset,
     fetchLatestRelease,
     fetchSha256Sums,
@@ -176,7 +177,25 @@ function applyPendingUpdate(): void {
             return;
         }
 
-        fs.renameSync(stagedPath, process.execPath);
+        const { error: renameError } = tryCatchSync(function () {
+            fs.renameSync(stagedPath, process.execPath);
+        });
+        if (renameError) {
+            const code = (renameError as NodeJS.ErrnoException).code;
+            if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
+                // Cleanup so we don't re-enter this failure on every launch.
+                cleanupStagedArtifacts();
+                appendLastError(
+                    "apply",
+                    `rename ${code}: ${renameError.message}`
+                );
+                warnApplyFailed(
+                    `binary directory not writable (${code}) — run "sudo worktree update" to install the pending update manually`
+                );
+                return;
+            }
+            throw renameError;
+        }
         safeUnlinkSync(metaPath);
         // Bump the throttle so the sibling scheduleBackgroundUpdateCheck() in
         // src/index.ts doesn't spawn a redundant child-check immediately after
@@ -256,12 +275,18 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
             stderr: "ignore",
             stdout: "ignore",
             stdin: "ignore",
+            // POSIX: setsid() — survives terminal close (SIGHUP) so a slow
+            // download isn't cut short when the user's shell exits.
+            detached: true,
         }).unref();
     } catch (error) {
-        appendLastError(
-            "check",
-            `spawn: ${error instanceof Error ? error.message : String(error)}`
-        );
+        // Only swallow errno-style errors (spawn failures, fs errors). Let
+        // programmer bugs (TypeError, ReferenceError) propagate so they
+        // surface via Bun's default unhandled-rejection handler.
+        if (!(error instanceof Error) || !("code" in error)) {
+            throw error;
+        }
+        appendLastError("check", `spawn: ${error.message}`);
     }
 }
 
@@ -304,11 +329,12 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         return entry.name === assetName;
     });
     if (!asset) {
+        // Don't record completion — asset-missing is transient (maintainer may
+        // upload the missing arch moments later). Let the next launch retry.
         appendLastError(
             "check",
             `release ${release.tag} missing asset ${assetName}`
         );
-        recordCheckCompleted();
         return;
     }
 
@@ -386,10 +412,7 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     // from the probed binary so apply can still run.
     if (verifiedHash === null) {
         const { data: computed, error: hashError } = tryCatchSync(function () {
-            const buffer = fs.readFileSync(tmpPath);
-            const hasher = new Bun.CryptoHasher("sha256");
-            hasher.update(buffer);
-            return hasher.digest("hex").toLowerCase();
+            return computeSha256Sync(tmpPath);
         });
         if (hashError || !computed) {
             safeUnlinkSync(tmpPath);
@@ -462,6 +485,14 @@ function probeBinaryRuns(filePath: string): ProbeResult {
         return {
             ok: false,
             reason: error?.message ?? "spawn failed",
+        };
+    }
+    if (result.exitCode === null) {
+        // Bun.spawnSync returns exitCode=null when the child was killed by the
+        // timeout — surface that explicitly instead of the opaque "exit null".
+        return {
+            ok: false,
+            reason: `timed out after ${PROBE_TIMEOUT_MS}ms`,
         };
     }
     if (result.exitCode !== 0) {

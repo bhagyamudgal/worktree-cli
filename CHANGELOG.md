@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** in the release workflow after stripping. Prior releases shipped unsigned binaries, which Apple Silicon (arm64) macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
+- Startup hash verification of a staged binary now reads in 64 KB chunks instead of buffering the full binary in memory, keeping peak RSS flat on every launch.
+- Asset-download phase now streams directly from `fetch` to disk via `Bun.write(destPath, response)` instead of round-tripping through an `ArrayBuffer`.
+- A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle — the next launch retries so users on the lagging arch get updated promptly once the asset is uploaded.
+- `worktree auto-update` failures caused by a read-only binary directory (`EACCES`/`EPERM`/`EROFS` on the atomic swap) now clean up the staged artifacts and print a one-line `run "sudo worktree update"` hint on stderr instead of looping on every launch.
+- `worktree update` now recognises `EACCES` on the download step and surfaces the same `sudo worktree update` hint it already showed on the rename step.
+- Unlink errors in cleanup paths now distinguish `ENOENT` (silent, expected) from real failures (`EACCES`, `EPERM`, etc.) — real failures emit a dim stderr warning instead of being silently swallowed.
+- `SHA256SUMS` parser now rejects duplicate filename entries (defense-in-depth against tampered mirrors).
+- Probe-timeout failures now surface as `timed out after 2000ms` instead of the opaque `exit null`.
+- Network errors from `fetchLatestRelease`/`downloadAsset` now preserve the underlying errno chain via `Error.cause`, so callers can classify failures accurately.
+- The background update child is now spawned with `detached: true` (POSIX `setsid()`), so a slow download isn't cut short when the user's shell/terminal exits — the child finishes the check in its own session.
 
 ## [1.2.0] - 2026-04-17
 

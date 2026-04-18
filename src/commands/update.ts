@@ -17,9 +17,13 @@ import {
 
 function isEaccesError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
-    if (!("code" in error)) return false;
-    // Node errno exceptions carry `code` but TypeScript's Error lacks it.
-    return (error as NodeJS.ErrnoException).code === "EACCES";
+    if ("code" in error && (error as NodeJS.ErrnoException).code === "EACCES") {
+        return true;
+    }
+    // release.ts wraps errno errors as `new Error(msg, { cause })` — walk the
+    // chain so EACCES surfaces even when the top-level Error lacks .code.
+    if ("cause" in error && error.cause) return isEaccesError(error.cause);
+    return false;
 }
 
 export const updateCommand = command({
@@ -88,7 +92,11 @@ export const updateCommand = command({
         );
         if (dlError) {
             await safeUnlink(tmpPath);
-            printError(dlError.message);
+            if (isEaccesError(dlError)) {
+                printError("Permission denied. Try: sudo worktree update");
+            } else {
+                printError(dlError.message);
+            }
             process.exit(EXIT_CODES.ERROR);
         }
 

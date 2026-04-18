@@ -138,7 +138,8 @@ async function fetchLatestRelease(
     );
     if (error || !result) {
         throw new Error(
-            `Failed to reach GitHub releases API: ${error?.message ?? "unknown"}`
+            `Failed to reach GitHub releases API: ${error?.message ?? "unknown"}`,
+            { cause: error ?? undefined }
         );
     }
     return result;
@@ -159,13 +160,14 @@ async function downloadAsset(
                         `Download ${asset.name} failed: ${response.status} ${response.statusText}`
                     );
                 }
-                const buffer = await response.arrayBuffer();
-                await Bun.write(destPath, buffer);
+                await Bun.write(destPath, response);
             }
         )
     );
     if (error) {
-        throw new Error(`Failed to download ${asset.name}: ${error.message}`);
+        throw new Error(`Failed to download ${asset.name}: ${error.message}`, {
+            cause: error,
+        });
     }
 }
 
@@ -174,21 +176,47 @@ type HashResult =
     | { ok: false; kind: "mismatch" }
     | { ok: false; kind: "io-error"; cause: Error };
 
+const HASH_CHUNK_BYTES = 64 * 1024;
+
+async function computeSha256Async(filePath: string): Promise<string> {
+    const hasher = new Bun.CryptoHasher("sha256");
+    const file = Bun.file(filePath);
+    for await (const chunk of file.stream()) {
+        hasher.update(chunk);
+    }
+    return hasher.digest("hex").toLowerCase();
+}
+
+function computeSha256Sync(filePath: string): string {
+    const hasher = new Bun.CryptoHasher("sha256");
+    const fd = fs.openSync(filePath, "r");
+    try {
+        const buffer = Buffer.alloc(HASH_CHUNK_BYTES);
+        while (true) {
+            const bytesRead = fs.readSync(
+                fd,
+                buffer,
+                0,
+                HASH_CHUNK_BYTES,
+                null
+            );
+            if (bytesRead === 0) break;
+            hasher.update(buffer.subarray(0, bytesRead));
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
+    return hasher.digest("hex").toLowerCase();
+}
+
 async function verifyBinaryHash(
     filePath: string,
     expectedSha256: string
 ): Promise<HashResult> {
-    const hasher = new Bun.CryptoHasher("sha256");
-    const file = Bun.file(filePath);
-    const { error } = await tryCatch(
-        (async function () {
-            for await (const chunk of file.stream()) {
-                hasher.update(chunk);
-            }
-        })()
+    const { data: actual, error } = await tryCatch(
+        computeSha256Async(filePath)
     );
     if (error) return { ok: false, kind: "io-error", cause: error };
-    const actual = hasher.digest("hex").toLowerCase();
     if (constantTimeEquals(actual, expectedSha256.toLowerCase())) {
         return { ok: true };
     }
@@ -200,10 +228,7 @@ function verifyBinaryHashSync(
     expectedSha256: string
 ): HashResult {
     const { data: actual, error } = tryCatchSync(function () {
-        const buffer = fs.readFileSync(filePath);
-        const hasher = new Bun.CryptoHasher("sha256");
-        hasher.update(buffer);
-        return hasher.digest("hex").toLowerCase();
+        return computeSha256Sync(filePath);
     });
     if (error) return { ok: false, kind: "io-error", cause: error };
     if (constantTimeEquals(actual, expectedSha256.toLowerCase())) {
@@ -270,13 +295,19 @@ function parseSha256Sums(text: string): Record<string, string> {
         const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
         if (!match) continue;
         const [, hash, filename] = match;
-        result[filename.trim()] = hash.toLowerCase();
+        const name = filename.trim();
+        if (Object.prototype.hasOwnProperty.call(result, name)) {
+            throw new Error(`Duplicate SHA256SUMS entry for ${name}`);
+        }
+        result[name] = hash.toLowerCase();
     }
     return result;
 }
 
 export {
     compareVersions,
+    computeSha256Async,
+    computeSha256Sync,
     downloadAsset,
     fetchLatestRelease,
     fetchSha256Sums,
