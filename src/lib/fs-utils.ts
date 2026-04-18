@@ -34,4 +34,35 @@ function safeUnlinkSync(filePath: string): void {
     }
 }
 
-export { safeUnlink, safeUnlinkSync };
+type WriteErrorCode = "EACCES" | "EPERM" | "EROFS";
+
+// release.ts wraps errno errors as `new Error(msg, { cause })` — walk the
+// cause chain so the "binary directory not writable" branch fires even
+// when the top-level Error lacks a .code field.
+function classifyWriteError(error: unknown): WriteErrorCode | null {
+    let cur: unknown = error;
+    while (cur instanceof Error) {
+        if ("code" in cur) {
+            const code = (cur as NodeJS.ErrnoException).code;
+            if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
+                return code;
+            }
+        }
+        cur = cur.cause;
+    }
+    return null;
+}
+
+// Walk `Error.cause` to the deepest leaf so the original errno message
+// (ENOTFOUND, ECONNRESET, ETIMEDOUT) surfaces to the user instead of the
+// generic wrapper ("Failed to reach GitHub releases API").
+function deepestMessage(error: unknown): string {
+    let cur: unknown = error;
+    while (cur instanceof Error && cur.cause !== undefined) {
+        cur = cur.cause;
+    }
+    return cur instanceof Error ? cur.message : String(cur);
+}
+
+export { classifyWriteError, deepestMessage, safeUnlink, safeUnlinkSync };
+export type { WriteErrorCode };

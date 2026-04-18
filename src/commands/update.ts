@@ -4,27 +4,19 @@ import pkg from "../../package.json";
 import { tryCatch } from "../lib/try-catch";
 import { printSuccess, printError, printInfo, COLORS } from "../lib/logger";
 import { EXIT_CODES } from "../lib/constants";
-import { safeUnlink } from "../lib/fs-utils";
+import {
+    classifyWriteError,
+    deepestMessage,
+    safeUnlink,
+} from "../lib/fs-utils";
 import {
     compareVersions,
     downloadAsset,
     fetchLatestRelease,
-    fetchSha256Sums,
     getAssetName,
     isStandalone,
-    verifyBinaryHash,
+    verifyAssetAgainstSums,
 } from "../lib/release";
-
-function isEaccesError(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    if ("code" in error && (error as NodeJS.ErrnoException).code === "EACCES") {
-        return true;
-    }
-    // release.ts wraps errno errors as `new Error(msg, { cause })` — walk the
-    // chain so EACCES surfaces even when the top-level Error lacks .code.
-    if ("cause" in error && error.cause) return isEaccesError(error.cause);
-    return false;
-}
 
 export const updateCommand = command({
     name: "update",
@@ -55,8 +47,9 @@ export const updateCommand = command({
             await tryCatch(fetchLatestRelease());
         if (releaseError || !release) {
             printError(
-                releaseError?.message ??
-                    "Failed to check for updates. Check your internet connection."
+                releaseError
+                    ? `Failed to check for updates: ${deepestMessage(releaseError)}`
+                    : "Failed to check for updates. Check your internet connection."
             );
             process.exit(EXIT_CODES.ERROR);
         }
@@ -87,50 +80,49 @@ export const updateCommand = command({
         printInfo(`Downloading ${assetName}...`);
 
         const tmpPath = `${binaryPath}.update-tmp`;
+        // Clear any pre-existing entry so the write can't follow a planted
+        // symlink in a shared install dir.
+        await safeUnlink(tmpPath);
         const { error: dlError } = await tryCatch(
             downloadAsset(asset, tmpPath)
         );
         if (dlError) {
             await safeUnlink(tmpPath);
-            if (isEaccesError(dlError)) {
+            if (classifyWriteError(dlError) !== null) {
                 printError("Permission denied. Try: sudo worktree update");
             } else {
-                printError(dlError.message);
+                printError(deepestMessage(dlError));
             }
             process.exit(EXIT_CODES.ERROR);
         }
 
-        const sums = await fetchSha256Sums(release.assets);
-        if (sums.kind === "error") {
+        const verify = await verifyAssetAgainstSums(
+            tmpPath,
+            assetName,
+            release.assets
+        );
+        if (!verify.ok) {
             await safeUnlink(tmpPath);
-            printError(
-                `SHA256SUMS is published but could not be fetched: ${sums.reason}. Refusing to install.`
-            );
-            process.exit(EXIT_CODES.ERROR);
-        }
-        if (sums.kind === "ok") {
-            const expected = sums.sums[assetName];
-            if (!expected) {
-                await safeUnlink(tmpPath);
+            if (verify.kind === "sums-error") {
+                printError(
+                    `SHA256SUMS is published but could not be fetched: ${verify.reason}. Refusing to install.`
+                );
+            } else if (verify.kind === "missing-entry") {
                 printError(
                     `SHA256SUMS is missing an entry for ${assetName}; refusing to install.`
                 );
-                process.exit(EXIT_CODES.ERROR);
+            } else if (verify.kind === "hash-io-error") {
+                printError(
+                    `Could not read downloaded binary for hash check: ${verify.cause.message}.`
+                );
+            } else {
+                printError(
+                    `Hash mismatch for ${assetName}; refusing to install.`
+                );
             }
-            const result = await verifyBinaryHash(tmpPath, expected);
-            if (!result.ok) {
-                await safeUnlink(tmpPath);
-                if (result.kind === "io-error") {
-                    printError(
-                        `Could not read downloaded binary for hash check: ${result.cause.message}.`
-                    );
-                } else {
-                    printError(
-                        `Hash mismatch for ${assetName}; refusing to install.`
-                    );
-                }
-                process.exit(EXIT_CODES.ERROR);
-            }
+            process.exit(EXIT_CODES.ERROR);
+        }
+        if (verify.hash !== null) {
             printInfo("Verified SHA256 checksum.");
         } else {
             printInfo(
@@ -152,10 +144,12 @@ export const updateCommand = command({
         );
         if (renameError) {
             await safeUnlink(tmpPath);
-            if (isEaccesError(renameError)) {
+            if (classifyWriteError(renameError) !== null) {
                 printError("Permission denied. Try: sudo worktree update");
             } else {
-                printError(`Failed to replace binary: ${renameError.message}`);
+                printError(
+                    `Failed to replace binary: ${deepestMessage(renameError)}`
+                );
             }
             process.exit(EXIT_CODES.ERROR);
         }

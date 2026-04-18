@@ -101,9 +101,24 @@ jobs:
 
             - run: chmod +x artifacts/worktree-*
 
+            # Create the release as a draft and upload all assets to it.
+            # Publishing happens in the next step so `releases/latest` never
+            # returns a release where binaries are attached but SHA256SUMS
+            # is still being uploaded — that window would let clients fall
+            # through to the TLS-only "not-published" path and install
+            # unverified.
             - uses: softprops/action-gh-release@v2
               with:
+                  draft: true
                   generate_release_notes: true
                   files: |
                       artifacts/worktree-*
                       artifacts/SHA256SUMS
+
+            - name: Publish release (flip draft to public)
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REF_NAME: ${{ github.ref_name }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  gh release edit "$REF_NAME" --repo "$REPO" --draft=false

@@ -2,7 +2,7 @@ import { z } from "zod";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_WORKTREE_DIR } from "./constants";
-import { tryCatch } from "./try-catch";
+import { tryCatch, tryCatchSync } from "./try-catch";
 
 const booleanLike = z
     .union([z.boolean(), z.string()])
@@ -78,44 +78,50 @@ function warnOnce(filePath: string, message: string): void {
     console.error(message);
 }
 
-async function readConfigFile(filePath: string): Promise<Config> {
+type ConfigScope = "project" | "global";
+
+async function readConfigFile(
+    filePath: string,
+    scope: ConfigScope
+): Promise<Config> {
     const file = Bun.file(filePath);
     const isExists = await file.exists();
     if (!isExists) return validateConfig({});
     const display = displayPath(filePath);
-    const { data: content, error } = await tryCatch(file.text());
-    if (error) {
+    const { data: content, error: readError } = await tryCatch(file.text());
+    if (readError) {
         warnOnce(
             filePath,
-            `warning: could not read ${display}: ${error.message}. Using defaults.`
+            `warning: could not read ${display}: ${readError.message}. Using defaults.`
         );
         return validateConfig({});
     }
-    const { data: parsed, error: parseError } = await tryCatch(
-        Promise.resolve().then(function () {
-            return validateConfig(parseConfigContent(content));
-        })
-    );
+    const raw = parseConfigContent(content);
+    if (scope === "project" && "AUTO_UPDATE" in raw) {
+        warnOnce(
+            `${filePath}:AUTO_UPDATE`,
+            `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead.`
+        );
+    }
+    const { data: parsed, error: parseError } = tryCatchSync(function () {
+        return validateConfig(raw);
+    });
     if (parseError) {
         warnOnce(
             filePath,
-            `warning: ${display} is invalid: ${parseError.message}.`
+            `warning: ${display} is invalid: ${parseError.message}. Using defaults.`
         );
-        throw parseError;
+        return validateConfig({});
     }
     return parsed;
 }
 
 async function loadConfig(root: string): Promise<Config> {
-    const { data, error } = await tryCatch(
-        readConfigFile(path.join(root, ".worktreerc"))
-    );
-    if (error || !data) return validateConfig({});
-    return data;
+    return readConfigFile(path.join(root, ".worktreerc"), "project");
 }
 
 async function loadGlobalConfig(): Promise<Config> {
-    return readConfigFile(path.join(os.homedir(), ".worktreerc"));
+    return readConfigFile(path.join(os.homedir(), ".worktreerc"), "global");
 }
 
 export { loadConfig, loadGlobalConfig, parseConfigContent, validateConfig };

@@ -2,16 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadGlobalConfig } from "./config";
-import { safeUnlinkSync } from "./fs-utils";
+import { classifyWriteError, safeUnlinkSync } from "./fs-utils";
 import {
     compareVersions,
     computeSha256Sync,
     downloadAsset,
     fetchLatestRelease,
-    fetchSha256Sums,
     getAssetName,
     isStandalone,
-    verifyBinaryHash,
+    verifyAssetAgainstSums,
     verifyBinaryHashSync,
 } from "./release";
 import { tryCatch, tryCatchSync } from "./try-catch";
@@ -122,7 +121,12 @@ function applyPendingUpdate(): void {
     try {
         if (!isStandalone()) return;
         const stagedPath = getStagingPath();
-        if (!fs.existsSync(stagedPath)) return;
+        if (!fs.existsSync(stagedPath)) {
+            // Orphan sidecar from an interrupted stage — clean it up so it
+            // doesn't linger forever waiting for a binary that never comes.
+            safeUnlinkSync(getMetaSidecarPath());
+            return;
+        }
 
         const metaPath = getMetaSidecarPath();
         if (!fs.existsSync(metaPath)) {
@@ -181,20 +185,27 @@ function applyPendingUpdate(): void {
             fs.renameSync(stagedPath, process.execPath);
         });
         if (renameError) {
-            const code = (renameError as NodeJS.ErrnoException).code;
-            if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
-                // Cleanup so we don't re-enter this failure on every launch.
-                cleanupStagedArtifacts();
-                appendLastError(
-                    "apply",
-                    `rename ${code}: ${renameError.message}`
-                );
+            // Always cleanup so a persistent rename failure (ETXTBSY, EXDEV,
+            // ENOSPC, EIO, EBUSY, EACCES/EPERM/EROFS) doesn't loop on every
+            // launch — if rename fails once it's almost certainly going to
+            // fail again until the user intervenes.
+            cleanupStagedArtifacts();
+            const writeCode = classifyWriteError(renameError);
+            const rawCode = (renameError as NodeJS.ErrnoException).code;
+            appendLastError(
+                "apply",
+                `rename ${rawCode ?? "unknown"}: ${renameError.message}`
+            );
+            if (writeCode !== null) {
                 warnApplyFailed(
-                    `binary directory not writable (${code}) — run "sudo worktree update" to install the pending update manually`
+                    `binary directory not writable (${writeCode}) — run "sudo worktree update" to install the pending update manually`
                 );
-                return;
+            } else {
+                warnApplyFailed(
+                    `rename failed (${rawCode ?? renameError.message}) — staged update discarded`
+                );
             }
-            throw renameError;
+            return;
         }
         safeUnlinkSync(metaPath);
         // Bump the throttle so the sibling scheduleBackgroundUpdateCheck() in
@@ -222,7 +233,11 @@ function warnApplyFailed(reason: string): void {
 
 async function readLastCheckMs(): Promise<number | null> {
     const file = Bun.file(getLastCheckPath());
-    const { data: exists } = await tryCatch(file.exists());
+    const { data: exists, error: existsError } = await tryCatch(file.exists());
+    if (existsError) {
+        appendLastError("check", `last-check exists: ${existsError.message}`);
+        return null;
+    }
     if (!exists) return null;
     const { data: text, error } = await tryCatch(file.text());
     if (error) {
@@ -243,12 +258,7 @@ async function readLastCheckMs(): Promise<number | null> {
 
 async function isAutoUpdateDisabled(): Promise<boolean> {
     if (process.env.WORKTREE_NO_UPDATE === "1") return true;
-    const { data: config, error } = await tryCatch(loadGlobalConfig());
-    if (error) {
-        appendLastError("check", `config load: ${error.message}`);
-        return true;
-    }
-    if (!config) return true;
+    const config = await loadGlobalConfig();
     return config.AUTO_UPDATE === false;
 }
 
@@ -344,6 +354,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         `${STAGING_FILENAME}.${process.pid}.tmp`
     );
 
+    // Clear any pre-existing entry (symlink / leftover tmp) so the subsequent
+    // write can't follow a planted symlink to an attacker-chosen target.
+    safeUnlinkSync(tmpPath);
     const { error: dlError } = await tryCatch(downloadAsset(asset, tmpPath));
     if (dlError) {
         safeUnlinkSync(tmpPath);
@@ -353,43 +366,35 @@ async function runBackgroundUpdateCheck(): Promise<void> {
 
     // Verify integrity BEFORE making the binary executable or running it.
     // Running an unverified binary (even just `--version`) is code execution.
-    const sums = await fetchSha256Sums(release.assets);
-    if (sums.kind === "error") {
+    const verify = await verifyAssetAgainstSums(
+        tmpPath,
+        assetName,
+        release.assets
+    );
+    if (!verify.ok) {
         safeUnlinkSync(tmpPath);
-        appendLastError(
-            "check",
-            `SHA256SUMS fetch failed — refusing to stage: ${sums.reason}`
-        );
-        return;
-    }
-
-    let verifiedHash: string | null = null;
-    if (sums.kind === "ok") {
-        const expected = sums.sums[assetName];
-        if (!expected) {
-            safeUnlinkSync(tmpPath);
+        if (verify.kind === "sums-error") {
+            appendLastError(
+                "check",
+                `SHA256SUMS fetch failed — refusing to stage: ${verify.reason}`
+            );
+        } else if (verify.kind === "missing-entry") {
             appendLastError(
                 "check",
                 `SHA256SUMS missing entry for ${assetName}`
             );
-            return;
+        } else if (verify.kind === "hash-io-error") {
+            appendLastError(
+                "check",
+                `hash io-error for ${assetName}: ${verify.cause.message}`
+            );
+        } else {
+            appendLastError("check", `hash mismatch for ${assetName}`);
         }
-        const verify = await verifyBinaryHash(tmpPath, expected);
-        if (!verify.ok) {
-            safeUnlinkSync(tmpPath);
-            if (verify.kind === "io-error") {
-                appendLastError(
-                    "check",
-                    `hash io-error for ${assetName}: ${verify.cause.message}`
-                );
-            } else {
-                appendLastError("check", `hash mismatch for ${assetName}`);
-            }
-            return;
-        }
-        verifiedHash = expected.toLowerCase();
+        return;
     }
-    // sums.kind === "not-published" → legacy release without SHA256SUMS; trust TLS.
+    // verify.hash === null → legacy release without SHA256SUMS; trust TLS.
+    let verifiedHash: string | null = verify.hash;
 
     const { error: chmodError } = tryCatchSync(function () {
         fs.chmodSync(tmpPath, 0o755);
@@ -435,6 +440,8 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         version: release.version,
         sha256: verifiedHash,
     });
+    // Same symlink-safety treatment as the binary tmpPath.
+    safeUnlinkSync(metaTmpPath);
     const { error: metaWriteError } = tryCatchSync(function () {
         fs.writeFileSync(metaTmpPath, sidecarContent);
     });

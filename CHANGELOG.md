@@ -14,9 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CI: bumped `actions/checkout`, `actions/upload-artifact`, and `actions/download-artifact` to latest majors (Node.js 24 runtime) to address GitHub's deprecation of Node.js 20 actions
+- CI: bumped `actions/checkout`, `actions/upload-artifact`, and `actions/download-artifact` to latest majors (Node.js 24 runtime) to address GitHub's deprecation of Node.js 20 actions.
 - Release binaries now built with `--minify --sourcemap=none` and stripped of debug symbols (`llvm-strip` on Linux, `strip` on macOS). Binary sizes are slightly smaller; functional behavior unchanged.
 - Release workflow smoke-tests each built binary via `--version` before publishing to catch regressions.
+- `AUTO_UPDATE` set in a project `.worktreerc` now warns once that it is ignored — the flag only takes effect in `~/.worktreerc`, matching the README.
+- `readConfigFile` is now fail-open on parse errors (warn + return defaults) for both project and global configs, instead of asymmetrically swallowing for project / propagating for global.
+- SHA256SUMS verification is centralized in a new `verifyAssetAgainstSums` helper; the foreground `update` command and the background check share the same discriminated-union result contract.
+
+### Security
+
+- SHA256SUMS parser now allocates its result map with `Object.create(null)` to block `__proto__`/`constructor`/`prototype` pollution from a tampered sums file.
+- SHA256 hash comparison now uses `node:crypto.timingSafeEqual` (C-level constant-time) instead of a userland XOR loop that V8/JSC may short-circuit.
+- Release asset downloads now reject responses whose declared `Content-Length` exceeds 200 MB, capping the blast radius of a malicious CDN before SHA verification fires.
+- The staging tmp path is now `safeUnlinkSync`-ed before each download, so an attacker-planted symlink in a shared install directory cannot redirect the write to an arbitrary target. Same treatment applies to the sidecar tmp path.
+- GitHub release workflow now creates releases as **draft**, uploads all files (binaries + `SHA256SUMS`), and flips to public in a subsequent step — eliminating the window where `releases/latest` returned a non-draft release with binaries attached but `SHA256SUMS` still uploading (which would let clients fall through to the TLS-only "not-published" install path).
+- `SHA256SUMS` parser now rejects duplicate filename entries (defense-in-depth against tampered mirrors).
 
 ### Fixed
 
@@ -25,9 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Asset-download phase now streams directly from `fetch` to disk via `Bun.write(destPath, response)` instead of round-tripping through an `ArrayBuffer`.
 - A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle — the next launch retries so users on the lagging arch get updated promptly once the asset is uploaded.
 - `worktree auto-update` failures caused by a read-only binary directory (`EACCES`/`EPERM`/`EROFS` on the atomic swap) now clean up the staged artifacts and print a one-line `run "sudo worktree update"` hint on stderr instead of looping on every launch.
-- `worktree update` now recognises `EACCES` on the download step and surfaces the same `sudo worktree update` hint it already showed on the rename step.
+- Non-permission rename failures (`ETXTBSY`, `EXDEV`, `ENOSPC`, `EIO`, `EBUSY`) now cleanup the staged artifacts too, so a persistent rename failure can't pin a warning on every single launch.
+- Orphan `.worktree.next.meta` sidecar left by an interrupted background stage is now cleaned up on the next launch instead of lingering indefinitely.
+- Background check's 24h throttle no longer thrashes if the cache file's `.exists()` probe errors out — the error is logged and the check proceeds as if no check has run, matching the symmetric `.text()` read-error behavior.
+- `worktree update` now recognises `EACCES`/`EPERM`/`EROFS` on the download and rename steps (previously only `EACCES`) and surfaces the deepest `Error.cause` message so users see the real errno (`ENOTFOUND`, `ECONNRESET`, etc.) instead of the generic wrapper.
 - Unlink errors in cleanup paths now distinguish `ENOENT` (silent, expected) from real failures (`EACCES`, `EPERM`, etc.) — real failures emit a dim stderr warning instead of being silently swallowed.
-- `SHA256SUMS` parser now rejects duplicate filename entries (defense-in-depth against tampered mirrors).
 - Probe-timeout failures now surface as `timed out after 2000ms` instead of the opaque `exit null`.
 - Network errors from `fetchLatestRelease`/`downloadAsset` now preserve the underlying errno chain via `Error.cause`, so callers can classify failures accurately.
 - The background update child is now spawned with `detached: true` (POSIX `setsid()`), so a slow download isn't cut short when the user's shell/terminal exits — the child finishes the check in its own session.

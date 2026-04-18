@@ -96,6 +96,8 @@ Or set `WORKTREE_NO_UPDATE=1` in your environment (useful in CI).
 
 Auto-update is a no-op when running via `bun run dev` or in any non-standalone invocation.
 
+Background check failures (network errors, hash mismatches, filesystem issues) are logged to `~/.cache/worktree-cli/last-error` — check this file if auto-updates seem stuck.
+
 ### Manual
 
 ```bash

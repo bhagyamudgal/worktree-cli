@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { tryCatch, tryCatchSync } from "./try-catch";
 
 const REPO = "bhagyamudgal/worktree-cli";
@@ -6,6 +7,10 @@ const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/lates
 
 const DEFAULT_META_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSET_TIMEOUT_MS = 600_000;
+// Hard cap on downloaded release assets. Current binaries are ~50 MB, so
+// 200 MB leaves 4× headroom while still rejecting a malicious CDN response
+// that would fill the binary-dir filesystem before SHA verification fires.
+const MAX_ASSET_BYTES = 200 * 1024 * 1024;
 
 type ReleaseAsset = {
     name: string;
@@ -160,6 +165,18 @@ async function downloadAsset(
                         `Download ${asset.name} failed: ${response.status} ${response.statusText}`
                     );
                 }
+                const contentLength = response.headers.get("content-length");
+                if (contentLength !== null) {
+                    const declared = Number(contentLength);
+                    if (
+                        Number.isFinite(declared) &&
+                        declared > MAX_ASSET_BYTES
+                    ) {
+                        throw new Error(
+                            `Download ${asset.name} refused: declared size ${declared} bytes exceeds cap ${MAX_ASSET_BYTES} bytes`
+                        );
+                    }
+                }
                 await Bun.write(destPath, response);
             }
         )
@@ -239,11 +256,9 @@ function verifyBinaryHashSync(
 
 function constantTimeEquals(a: string, b: string): boolean {
     if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) {
-        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    }
-    return diff === 0;
+    // node:crypto.timingSafeEqual is a C-level constant-time compare —
+    // strictly better than a userland XOR loop that V8/JSC may short-circuit.
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 type Sha256SumsResult =
@@ -287,8 +302,51 @@ async function fetchSha256Sums(
     return result;
 }
 
+// Unified entry point for "download is on disk — verify it against SHA256SUMS
+// before we chmod/rename/execute". Both the foreground `update` command and
+// the background check need this exact flow; keeping it in one place means a
+// future tweak (e.g., stricter not-published handling) lands everywhere.
+type VerifyAssetResult =
+    | { ok: true; hash: string | null } // hash === null when SHA256SUMS isn't published
+    | { ok: false; kind: "sums-error"; reason: string }
+    | { ok: false; kind: "missing-entry" }
+    | { ok: false; kind: "hash-io-error"; cause: Error }
+    | { ok: false; kind: "hash-mismatch" };
+
+async function verifyAssetAgainstSums(
+    tmpPath: string,
+    assetName: string,
+    assets: ReleaseAsset[]
+): Promise<VerifyAssetResult> {
+    const sums = await fetchSha256Sums(assets);
+    if (sums.kind === "error") {
+        return { ok: false, kind: "sums-error", reason: sums.reason };
+    }
+    if (sums.kind === "not-published") {
+        return { ok: true, hash: null };
+    }
+    const expected = sums.sums[assetName];
+    if (!expected) {
+        return { ok: false, kind: "missing-entry" };
+    }
+    const hashResult = await verifyBinaryHash(tmpPath, expected);
+    if (!hashResult.ok) {
+        if (hashResult.kind === "io-error") {
+            return {
+                ok: false,
+                kind: "hash-io-error",
+                cause: hashResult.cause,
+            };
+        }
+        return { ok: false, kind: "hash-mismatch" };
+    }
+    return { ok: true, hash: expected.toLowerCase() };
+}
+
 function parseSha256Sums(text: string): Record<string, string> {
-    const result: Record<string, string> = {};
+    // Object.create(null) blocks __proto__/constructor/prototype key
+    // pollution from an attacker-substituted SHA256SUMS file.
+    const result: Record<string, string> = Object.create(null);
     for (const line of text.split("\n")) {
         const trimmed = line.trim();
         if (trimmed === "" || trimmed.startsWith("#")) continue;
@@ -306,7 +364,6 @@ function parseSha256Sums(text: string): Record<string, string> {
 
 export {
     compareVersions,
-    computeSha256Async,
     computeSha256Sync,
     downloadAsset,
     fetchLatestRelease,
@@ -314,7 +371,14 @@ export {
     getAssetName,
     isStandalone,
     parseSha256Sums,
+    verifyAssetAgainstSums,
     verifyBinaryHash,
     verifyBinaryHashSync,
 };
-export type { HashResult, ReleaseAsset, ReleaseInfo, Sha256SumsResult };
+export type {
+    HashResult,
+    ReleaseAsset,
+    ReleaseInfo,
+    Sha256SumsResult,
+    VerifyAssetResult,
+};
