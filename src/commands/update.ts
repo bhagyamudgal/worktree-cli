@@ -4,6 +4,7 @@ import pkg from "../../package.json";
 import { tryCatch } from "../lib/try-catch";
 import { printSuccess, printError, printInfo, COLORS } from "../lib/logger";
 import { EXIT_CODES } from "../lib/constants";
+import { safeUnlink } from "../lib/fs-utils";
 import {
     compareVersions,
     downloadAsset,
@@ -17,12 +18,8 @@ import {
 function isEaccesError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
     if (!("code" in error)) return false;
+    // Node errno exceptions carry `code` but TypeScript's Error lacks it.
     return (error as NodeJS.ErrnoException).code === "EACCES";
-}
-
-// Best-effort cleanup — the primary error is surfaced by the caller.
-async function safeUnlink(filePath: string): Promise<void> {
-    await fs.unlink(filePath).catch(function () {});
 }
 
 export const updateCommand = command({
@@ -95,15 +92,6 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        const { error: chmodError } = await tryCatch(fs.chmod(tmpPath, 0o755));
-        if (chmodError) {
-            await safeUnlink(tmpPath);
-            printError(
-                `Failed to mark binary executable: ${chmodError.message}`
-            );
-            process.exit(EXIT_CODES.ERROR);
-        }
-
         const sums = await fetchSha256Sums(release.assets);
         if (sums.kind === "error") {
             await safeUnlink(tmpPath);
@@ -121,12 +109,18 @@ export const updateCommand = command({
                 );
                 process.exit(EXIT_CODES.ERROR);
             }
-            const ok = await verifyBinaryHash(tmpPath, expected);
-            if (!ok) {
+            const result = await verifyBinaryHash(tmpPath, expected);
+            if (!result.ok) {
                 await safeUnlink(tmpPath);
-                printError(
-                    `Hash mismatch for ${assetName}; refusing to install.`
-                );
+                if (result.kind === "io-error") {
+                    printError(
+                        `Could not read downloaded binary for hash check: ${result.cause.message}.`
+                    );
+                } else {
+                    printError(
+                        `Hash mismatch for ${assetName}; refusing to install.`
+                    );
+                }
                 process.exit(EXIT_CODES.ERROR);
             }
             printInfo("Verified SHA256 checksum.");
@@ -134,6 +128,15 @@ export const updateCommand = command({
             printInfo(
                 "No SHA256SUMS published for this release; proceeding without hash verification."
             );
+        }
+
+        const { error: chmodError } = await tryCatch(fs.chmod(tmpPath, 0o755));
+        if (chmodError) {
+            await safeUnlink(tmpPath);
+            printError(
+                `Failed to mark binary executable: ${chmodError.message}`
+            );
+            process.exit(EXIT_CODES.ERROR);
         }
 
         const { error: renameError } = await tryCatch(

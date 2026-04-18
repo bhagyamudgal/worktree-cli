@@ -61,14 +61,33 @@ function validateConfig(raw: Record<string, string>): Config {
     return configSchema.parse(raw);
 }
 
+const warnedPaths = new Set<string>();
+
+function displayPath(filePath: string): string {
+    const home = os.homedir();
+    if (filePath === home) return "~";
+    if (filePath.startsWith(home + path.sep)) {
+        return "~" + filePath.slice(home.length);
+    }
+    return filePath;
+}
+
+function warnOnce(filePath: string, message: string): void {
+    if (warnedPaths.has(filePath)) return;
+    warnedPaths.add(filePath);
+    console.error(message);
+}
+
 async function readConfigFile(filePath: string): Promise<Config> {
     const file = Bun.file(filePath);
     const isExists = await file.exists();
     if (!isExists) return validateConfig({});
+    const display = displayPath(filePath);
     const { data: content, error } = await tryCatch(file.text());
     if (error) {
-        console.error(
-            `warning: could not read ${filePath}: ${error.message}. Using defaults.`
+        warnOnce(
+            filePath,
+            `warning: could not read ${display}: ${error.message}. Using defaults.`
         );
         return validateConfig({});
     }
@@ -77,17 +96,22 @@ async function readConfigFile(filePath: string): Promise<Config> {
             return validateConfig(parseConfigContent(content));
         })
     );
-    if (parseError || !parsed) {
-        console.error(
-            `warning: ${filePath} is invalid: ${parseError?.message ?? "unknown"}. Using defaults.`
+    if (parseError) {
+        warnOnce(
+            filePath,
+            `warning: ${display} is invalid: ${parseError.message}.`
         );
-        return validateConfig({});
+        throw parseError;
     }
     return parsed;
 }
 
 async function loadConfig(root: string): Promise<Config> {
-    return readConfigFile(path.join(root, ".worktreerc"));
+    const { data, error } = await tryCatch(
+        readConfigFile(path.join(root, ".worktreerc"))
+    );
+    if (error || !data) return validateConfig({});
+    return data;
 }
 
 async function loadGlobalConfig(): Promise<Config> {

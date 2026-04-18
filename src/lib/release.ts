@@ -1,4 +1,5 @@
-import { tryCatch } from "./try-catch";
+import fs from "node:fs";
+import { tryCatch, tryCatchSync } from "./try-catch";
 
 const REPO = "bhagyamudgal/worktree-cli";
 const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
@@ -97,16 +98,18 @@ function isReleaseInfo(value: unknown): value is {
     });
 }
 
-async function fetchWithTimeout(
+async function withTimeout<T>(
     url: string,
-    timeoutMs: number
-): Promise<Response> {
+    timeoutMs: number,
+    handler: (response: Response) => Promise<T>
+): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(function () {
         controller.abort();
     }, timeoutMs);
     try {
-        return await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal });
+        return await handler(response);
     } finally {
         clearTimeout(timer);
     }
@@ -115,29 +118,30 @@ async function fetchWithTimeout(
 async function fetchLatestRelease(
     timeoutMs: number = DEFAULT_META_TIMEOUT_MS
 ): Promise<ReleaseInfo> {
-    const { data: response, error } = await tryCatch(
-        fetchWithTimeout(API_RELEASES_LATEST, timeoutMs)
+    const { data: result, error } = await tryCatch(
+        withTimeout(API_RELEASES_LATEST, timeoutMs, async function (response) {
+            if (!response.ok) {
+                throw new Error(
+                    `GitHub API error: ${response.status} ${response.statusText}`
+                );
+            }
+            const json = await response.json();
+            if (!isReleaseInfo(json)) {
+                throw new Error("Release payload missing tag_name or assets");
+            }
+            return {
+                tag: json.tag_name,
+                version: json.tag_name.replace(/^v/, ""),
+                assets: json.assets,
+            };
+        })
     );
-    if (error || !response) {
+    if (error || !result) {
         throw new Error(
             `Failed to reach GitHub releases API: ${error?.message ?? "unknown"}`
         );
     }
-    if (!response.ok) {
-        throw new Error(
-            `GitHub API error: ${response.status} ${response.statusText}`
-        );
-    }
-    const { data: json, error: jsonError } = await tryCatch(response.json());
-    if (jsonError)
-        throw new Error(`Invalid release JSON: ${jsonError.message}`);
-    if (!isReleaseInfo(json))
-        throw new Error("Release payload missing tag_name or assets");
-    return {
-        tag: json.tag_name,
-        version: json.tag_name.replace(/^v/, ""),
-        assets: json.assets,
-    };
+    return result;
 }
 
 async function downloadAsset(
@@ -145,32 +149,35 @@ async function downloadAsset(
     destPath: string,
     timeoutMs: number = DEFAULT_ASSET_TIMEOUT_MS
 ): Promise<void> {
-    const { data: response, error } = await tryCatch(
-        fetchWithTimeout(asset.browser_download_url, timeoutMs)
+    const { error } = await tryCatch(
+        withTimeout(
+            asset.browser_download_url,
+            timeoutMs,
+            async function (response) {
+                if (!response.ok) {
+                    throw new Error(
+                        `Download ${asset.name} failed: ${response.status} ${response.statusText}`
+                    );
+                }
+                const buffer = await response.arrayBuffer();
+                await Bun.write(destPath, buffer);
+            }
+        )
     );
-    if (error || !response) {
-        throw new Error(
-            `Failed to download ${asset.name}: ${error?.message ?? "unknown"}`
-        );
+    if (error) {
+        throw new Error(`Failed to download ${asset.name}: ${error.message}`);
     }
-    if (!response.ok) {
-        throw new Error(
-            `Download ${asset.name} failed: ${response.status} ${response.statusText}`
-        );
-    }
-    const { data: buffer, error: bufError } = await tryCatch(
-        response.arrayBuffer()
-    );
-    if (bufError || !buffer) {
-        throw new Error(`Failed to read ${asset.name} body`);
-    }
-    await Bun.write(destPath, buffer);
 }
+
+type HashResult =
+    | { ok: true }
+    | { ok: false; kind: "mismatch" }
+    | { ok: false; kind: "io-error"; cause: Error };
 
 async function verifyBinaryHash(
     filePath: string,
     expectedSha256: string
-): Promise<boolean> {
+): Promise<HashResult> {
     const hasher = new Bun.CryptoHasher("sha256");
     const file = Bun.file(filePath);
     const { error } = await tryCatch(
@@ -180,12 +187,29 @@ async function verifyBinaryHash(
             }
         })()
     );
-    if (error) return false;
-    const actual = hasher.digest("hex");
-    return constantTimeEquals(
-        actual.toLowerCase(),
-        expectedSha256.toLowerCase()
-    );
+    if (error) return { ok: false, kind: "io-error", cause: error };
+    const actual = hasher.digest("hex").toLowerCase();
+    if (constantTimeEquals(actual, expectedSha256.toLowerCase())) {
+        return { ok: true };
+    }
+    return { ok: false, kind: "mismatch" };
+}
+
+function verifyBinaryHashSync(
+    filePath: string,
+    expectedSha256: string
+): HashResult {
+    const { data: actual, error } = tryCatchSync(function () {
+        const buffer = fs.readFileSync(filePath);
+        const hasher = new Bun.CryptoHasher("sha256");
+        hasher.update(buffer);
+        return hasher.digest("hex").toLowerCase();
+    });
+    if (error) return { ok: false, kind: "io-error", cause: error };
+    if (constantTimeEquals(actual, expectedSha256.toLowerCase())) {
+        return { ok: true };
+    }
+    return { ok: false, kind: "mismatch" };
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -210,26 +234,32 @@ async function fetchSha256Sums(
         return entry.name === "SHA256SUMS";
     });
     if (!sumsAsset) return { kind: "not-published" };
-    const { data: response, error } = await tryCatch(
-        fetchWithTimeout(sumsAsset.browser_download_url, timeoutMs)
+    const { data: result, error } = await tryCatch(
+        withTimeout(
+            sumsAsset.browser_download_url,
+            timeoutMs,
+            async function (response): Promise<Sha256SumsResult> {
+                if (!response.ok) {
+                    return {
+                        kind: "error",
+                        reason: `${response.status} ${response.statusText}`,
+                    };
+                }
+                const text = await response.text();
+                if (!text) {
+                    return {
+                        kind: "error",
+                        reason: "empty SHA256SUMS body",
+                    };
+                }
+                return { kind: "ok", sums: parseSha256Sums(text) };
+            }
+        )
     );
-    if (error || !response) {
+    if (error || !result) {
         return { kind: "error", reason: error?.message ?? "network error" };
     }
-    if (!response.ok) {
-        return {
-            kind: "error",
-            reason: `${response.status} ${response.statusText}`,
-        };
-    }
-    const { data: text, error: textError } = await tryCatch(response.text());
-    if (textError) {
-        return { kind: "error", reason: textError.message };
-    }
-    if (!text) {
-        return { kind: "error", reason: "empty SHA256SUMS body" };
-    }
-    return { kind: "ok", sums: parseSha256Sums(text) };
+    return result;
 }
 
 function parseSha256Sums(text: string): Record<string, string> {
@@ -254,5 +284,6 @@ export {
     isStandalone,
     parseSha256Sums,
     verifyBinaryHash,
+    verifyBinaryHashSync,
 };
-export type { ReleaseAsset, ReleaseInfo, Sha256SumsResult };
+export type { HashResult, ReleaseAsset, ReleaseInfo, Sha256SumsResult };
