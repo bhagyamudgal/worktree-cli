@@ -124,5 +124,31 @@ async function loadGlobalConfig(): Promise<Config> {
     return readConfigFile(path.join(os.homedir(), ".worktreerc"), "global");
 }
 
-export { loadConfig, loadGlobalConfig, parseConfigContent, validateConfig };
+// Auto-update reads config on every background check and must fail CLOSED
+// on parse/read errors. The generic readConfigFile falls back to defaults
+// (AUTO_UPDATE: true), which would silently override a user's explicit
+// opt-out whenever their config has a typo. This helper returns the
+// narrow signal "should auto-update fire?" with fail-closed semantics.
+async function shouldAutoUpdate(): Promise<boolean> {
+    const filePath = path.join(os.homedir(), ".worktreerc");
+    const file = Bun.file(filePath);
+    const isExists = await file.exists();
+    if (!isExists) return true;
+    const { data: content, error: readError } = await tryCatch(file.text());
+    if (readError) return false;
+    const raw = parseConfigContent(content);
+    const { data: parsed, error: parseError } = tryCatchSync(function () {
+        return validateConfig(raw);
+    });
+    if (parseError) return false;
+    return parsed.AUTO_UPDATE;
+}
+
+export {
+    loadConfig,
+    loadGlobalConfig,
+    parseConfigContent,
+    shouldAutoUpdate,
+    validateConfig,
+};
 export type { Config };

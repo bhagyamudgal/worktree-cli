@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadGlobalConfig } from "./config";
+import { shouldAutoUpdate } from "./config";
 import { classifyWriteError, safeUnlinkSync } from "./fs-utils";
 import {
     compareVersions,
@@ -27,6 +27,11 @@ const PROBE_STDERR_TRUNCATE_BYTES = 500;
 const INTERNAL_CHECK_SUBCOMMAND = "__internal_update_check";
 const SIDECAR_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/;
 const SIDECAR_HASH_PATTERN = /^[0-9a-f]{64}$/;
+// Window in which a "partial" stage (sidecar without binary, or binary
+// without sidecar) may be a concurrent producer mid-commit rather than a
+// genuine orphan. applyPendingUpdate defers reaping anything fresher than
+// this so a simultaneous-launch race can't discard a correct staged update.
+const STAGING_ORPHAN_GRACE_MS = 60 * 1000;
 
 function getBinaryDir(): string {
     return path.dirname(process.execPath);
@@ -56,6 +61,25 @@ function ensureCacheDir(): void {
     fs.mkdirSync(getCacheDir(), { recursive: true });
 }
 
+let hasWarnedAboutLogFailure = false;
+
+function warnLogFailureOnce(reason: string): void {
+    if (hasWarnedAboutLogFailure) return;
+    hasWarnedAboutLogFailure = true;
+    const { DIM, RESET } = COLORS;
+    console.error(
+        `${DIM}worktree: auto-update error log unwritable (${reason}) — diagnostics unavailable${RESET}`
+    );
+}
+
+function appendBackgroundCheckPanic(error: unknown): void {
+    const detail =
+        error instanceof Error
+            ? `${error.name}: ${error.message}\n${error.stack ?? "<no stack>"}`
+            : String(error);
+    appendLastError("check", `PANIC — ${detail.replace(/\n/g, "\n  ")}`);
+}
+
 function appendLastError(kind: "apply" | "check", message: string): void {
     try {
         ensureCacheDir();
@@ -63,8 +87,10 @@ function appendLastError(kind: "apply" | "check", message: string): void {
         const logPath = getLastErrorPath();
         rotateErrorLogIfOversized(logPath);
         fs.appendFileSync(logPath, line);
-    } catch {
-        // never let the error log itself block anything
+    } catch (error) {
+        warnLogFailureOnce(
+            error instanceof Error ? error.message : String(error)
+        );
     }
 }
 
@@ -78,8 +104,10 @@ function rotateErrorLogIfOversized(logPath: string): void {
         });
         const kept = lines.slice(-ERROR_LOG_KEEP_LINES).join("\n") + "\n";
         fs.writeFileSync(logPath, kept);
-    } catch {
-        // best-effort rotation — if stat/read/write fails, fall through
+    } catch (error) {
+        warnLogFailureOnce(
+            error instanceof Error ? error.message : String(error)
+        );
     }
 }
 
@@ -115,22 +143,40 @@ function cleanupStagedArtifacts(): void {
     safeUnlinkSync(getMetaSidecarPath());
 }
 
+function isWithinGracePeriod(filePath: string): boolean {
+    const { data: stat } = tryCatchSync(function () {
+        return fs.statSync(filePath);
+    });
+    if (!stat) return false;
+    return Date.now() - stat.mtimeMs < STAGING_ORPHAN_GRACE_MS;
+}
+
 function applyPendingUpdate(): void {
     // Sync on purpose: runs before brocli.run; avoids top-level await.
     if (process.env.WORKTREE_NO_UPDATE === "1") return;
     try {
         if (!isStandalone()) return;
         const stagedPath = getStagingPath();
+        const metaPath = getMetaSidecarPath();
         if (!fs.existsSync(stagedPath)) {
-            // Orphan sidecar from an interrupted stage — clean it up so it
-            // doesn't linger forever waiting for a binary that never comes.
-            safeUnlinkSync(getMetaSidecarPath());
+            // Sidecar without binary. Two possible causes:
+            //   (a) a concurrent producer just committed the sidecar and is
+            //       about to rename the binary into place; or
+            //   (b) a crashed/abandoned previous stage left only the sidecar.
+            // Differentiate by mtime — within the grace window, leave alone
+            // so the producer can complete; past the window, treat as orphan
+            // and reap.
+            if (isWithinGracePeriod(metaPath)) return;
+            safeUnlinkSync(metaPath);
             return;
         }
 
-        const metaPath = getMetaSidecarPath();
         if (!fs.existsSync(metaPath)) {
-            // Staging was partial; clean up the orphaned binary.
+            // Binary without sidecar. Same producer-mid-commit vs orphan
+            // ambiguity — grace period prevents a concurrent launch from
+            // discarding a correctly-staged binary whose sidecar is about
+            // to land.
+            if (isWithinGracePeriod(stagedPath)) return;
             safeUnlinkSync(stagedPath);
             appendLastError(
                 "apply",
@@ -218,9 +264,16 @@ function applyPendingUpdate(): void {
             `worktree ${GREEN}${BOLD}auto-updated${RESET} to ${BOLD}v${meta.version}${RESET}`
         );
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        appendLastError("apply", message);
-        warnApplyFailed(message);
+        // Only swallow errno-style I/O errors. Programmer bugs (TypeError,
+        // ReferenceError, unexpected throws from parseSidecar, etc.) must
+        // propagate so Bun's unhandled handler surfaces a stack trace —
+        // otherwise a regression here degrades to a cryptic DIM warning
+        // forever. Matches the discipline in scheduleBackgroundUpdateCheck.
+        if (!(error instanceof Error) || !("code" in error)) {
+            throw error;
+        }
+        appendLastError("apply", error.message);
+        warnApplyFailed(error.message);
     }
 }
 
@@ -258,8 +311,9 @@ async function readLastCheckMs(): Promise<number | null> {
 
 async function isAutoUpdateDisabled(): Promise<boolean> {
     if (process.env.WORKTREE_NO_UPDATE === "1") return true;
-    const config = await loadGlobalConfig();
-    return config.AUTO_UPDATE === false;
+    // shouldAutoUpdate fails CLOSED on broken ~/.worktreerc so a typo'd
+    // config doesn't silently override a user's intended opt-out.
+    return !(await shouldAutoUpdate());
 }
 
 async function scheduleBackgroundUpdateCheck(): Promise<void> {
@@ -279,16 +333,37 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
         // successful check completes. Simultaneous launches may both spawn
         // (accepted trade-off — worst case 2 API calls within the anon 60/hr
         // limit) but a failed check never burns the 24h window.
-        Bun.spawn({
-            cmd: [process.execPath, INTERNAL_CHECK_SUBCOMMAND],
-            stdio: ["ignore", "ignore", "ignore"],
-            stderr: "ignore",
-            stdout: "ignore",
-            stdin: "ignore",
-            // POSIX: setsid() — survives terminal close (SIGHUP) so a slow
-            // download isn't cut short when the user's shell exits.
-            detached: true,
-        }).unref();
+        //
+        // Child stderr is appended to last-error (not "ignore") so an
+        // unhandled throw inside runBackgroundUpdateCheck surfaces with a
+        // stack trace on the next foreground launch — otherwise programmer
+        // bugs in the background path are invisible in production.
+        const { data: stderrFd } = tryCatchSync(function () {
+            ensureCacheDir();
+            return fs.openSync(getLastErrorPath(), "a");
+        });
+        try {
+            Bun.spawn({
+                cmd: [process.execPath, INTERNAL_CHECK_SUBCOMMAND],
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: stderrFd ?? "ignore",
+                // POSIX: setsid() — survives terminal close (SIGHUP) so a
+                // slow download isn't cut short when the user's shell exits.
+                detached: true,
+            }).unref();
+        } finally {
+            // Close the parent's copy regardless of spawn outcome. Bun.spawn
+            // throws synchronously on spawn failures (EMFILE, EPERM, EAGAIN)
+            // before the catch below runs, so without the finally a spawn
+            // failure would leak the fd on every foreground launch.
+            if (stderrFd !== null) {
+                const inheritedFd = stderrFd;
+                tryCatchSync(function () {
+                    fs.closeSync(inheritedFd);
+                });
+            }
+        }
     } catch (error) {
         // Only swallow errno-style errors (spawn failures, fs errors). Let
         // programmer bugs (TypeError, ReferenceError) propagate so they
@@ -393,7 +468,10 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         }
         return;
     }
-    // verify.hash === null → legacy release without SHA256SUMS; trust TLS.
+    // verify.hash === null → legacy release without SHA256SUMS. Upstream
+    // integrity rests on TLS alone; no end-to-end hash exists to compare
+    // against. See the sidecar-commit comment below for the narrower
+    // guarantee we can still provide for legacy releases.
     let verifiedHash: string | null = verify.hash;
 
     const { error: chmodError } = tryCatchSync(function () {
@@ -413,8 +491,12 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     }
 
     // Legacy releases without SHA256SUMS can't stage via the re-verify path
-    // because applyPendingUpdate needs a hash to check. Compute it ourselves
-    // from the probed binary so apply can still run.
+    // because applyPendingUpdate needs a hash to check. Self-compute from
+    // the downloaded bytes so apply can still run — note this hash is NOT
+    // an end-to-end integrity check (same bytes generate the hash being
+    // compared against). Its only guarantee is detecting stage→apply
+    // on-disk corruption; upstream tampering for legacy releases is
+    // blocked only by TLS.
     if (verifiedHash === null) {
         const { data: computed, error: hashError } = tryCatchSync(function () {
             return computeSha256Sync(tmpPath);
@@ -430,8 +512,18 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         verifiedHash = computed;
     }
 
-    // Commit sidecar BEFORE the binary rename so applyPendingUpdate never
-    // sees a staged binary without its metadata.
+    // Validate server-controlled release.version BEFORE writing — keeps the
+    // writer in lockstep with the reader's SIDECAR_VERSION_PATTERN check so a
+    // future parser relaxation can't turn a crafted tag into a hash-spoof.
+    if (!SIDECAR_VERSION_PATTERN.test(release.version)) {
+        safeUnlinkSync(tmpPath);
+        appendLastError(
+            "check",
+            `invalid release version for sidecar: ${JSON.stringify(release.version.slice(0, 40))}`
+        );
+        return;
+    }
+
     const metaTmpPath = path.join(
         binaryDir,
         `${META_SIDECAR_FILENAME}.${process.pid}.tmp`
@@ -520,6 +612,7 @@ function decodeProbeStderr(stderr: unknown): string {
 }
 
 export {
+    appendBackgroundCheckPanic,
     applyPendingUpdate,
     scheduleBackgroundUpdateCheck,
     runBackgroundUpdateCheck,

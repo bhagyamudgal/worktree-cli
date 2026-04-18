@@ -1,9 +1,27 @@
 import fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import { tryCatch, tryCatchSync } from "./try-catch";
+import pkg from "../../package.json";
 
 const REPO = "bhagyamudgal/worktree-cli";
 const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
+
+// GitHub REST API requires a User-Agent. Default Bun UA works today but is
+// fragile under future GitHub policy. Identifying as worktree-cli also
+// makes this client traceable in logs if something ever misbehaves.
+// When GITHUB_TOKEN is set, rate limit bumps from 60/hr (anon) to 5000/hr.
+function buildGitHubHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+        "User-Agent": `worktree-cli/${pkg.version}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    };
+    const token = process.env.GITHUB_TOKEN;
+    if (token && token.length > 0) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
+}
 
 const DEFAULT_META_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSET_TIMEOUT_MS = 600_000;
@@ -113,7 +131,10 @@ async function withTimeout<T>(
         controller.abort();
     }, timeoutMs);
     try {
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, {
+            signal: controller.signal,
+            headers: buildGitHubHeaders(),
+        });
         return await handler(response);
     } finally {
         clearTimeout(timer);
@@ -177,7 +198,46 @@ async function downloadAsset(
                         );
                     }
                 }
-                await Bun.write(destPath, response);
+                if (!response.body) {
+                    throw new Error(
+                        `Download ${asset.name} refused: empty response body`
+                    );
+                }
+                // Stream the body into a growing chunk list, tracking bytes
+                // received so we can bail out BEFORE buffering past the cap
+                // when Content-Length is absent or forged. A plain
+                // `response.arrayBuffer()` would buffer the whole body
+                // before any cap check; a plain `Bun.write(destPath, response)`
+                // doesn't propagate the fetch AbortSignal reliably into the
+                // body read. Manual reader gives us both bounds.
+                const reader = response.body.getReader();
+                const chunks: Uint8Array[] = [];
+                let bytesReceived = 0;
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        if (!value) continue;
+                        bytesReceived += value.byteLength;
+                        if (bytesReceived > MAX_ASSET_BYTES) {
+                            throw new Error(
+                                `Download ${asset.name} exceeded cap: ${bytesReceived} bytes > ${MAX_ASSET_BYTES} bytes`
+                            );
+                        }
+                        chunks.push(value);
+                    }
+                } finally {
+                    tryCatchSync(function () {
+                        reader.releaseLock();
+                    });
+                }
+                const buffer = new Uint8Array(bytesReceived);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    buffer.set(chunk, offset);
+                    offset += chunk.byteLength;
+                }
+                await Bun.write(destPath, buffer);
             }
         )
     );
@@ -264,7 +324,14 @@ function constantTimeEquals(a: string, b: string): boolean {
 type Sha256SumsResult =
     | { kind: "not-published" }
     | { kind: "ok"; sums: Record<string, string> }
-    | { kind: "error"; reason: string };
+    | { kind: "error"; reason: string; retryable: boolean };
+
+// 5xx / network errors are retryable (transient CDN or server issues).
+// 4xx responses are permanent (missing asset, auth problem). Callers can
+// use this to decide whether to skip burning the 24h throttle.
+function isRetryableHttpStatus(status: number): boolean {
+    return status >= 500 && status < 600;
+}
 
 async function fetchSha256Sums(
     assets: ReleaseAsset[],
@@ -283,6 +350,7 @@ async function fetchSha256Sums(
                     return {
                         kind: "error",
                         reason: `${response.status} ${response.statusText}`,
+                        retryable: isRetryableHttpStatus(response.status),
                     };
                 }
                 const text = await response.text();
@@ -290,6 +358,8 @@ async function fetchSha256Sums(
                     return {
                         kind: "error",
                         reason: "empty SHA256SUMS body",
+                        // Likely mid-publish or transient; next launch retries.
+                        retryable: true,
                     };
                 }
                 return { kind: "ok", sums: parseSha256Sums(text) };
@@ -297,7 +367,12 @@ async function fetchSha256Sums(
         )
     );
     if (error || !result) {
-        return { kind: "error", reason: error?.message ?? "network error" };
+        return {
+            kind: "error",
+            reason: error?.message ?? "network error",
+            // Network errors (DNS, abort, fetch throw) are transient.
+            retryable: true,
+        };
     }
     return result;
 }
@@ -308,7 +383,7 @@ async function fetchSha256Sums(
 // future tweak (e.g., stricter not-published handling) lands everywhere.
 type VerifyAssetResult =
     | { ok: true; hash: string | null } // hash === null when SHA256SUMS isn't published
-    | { ok: false; kind: "sums-error"; reason: string }
+    | { ok: false; kind: "sums-error"; reason: string; retryable: boolean }
     | { ok: false; kind: "missing-entry" }
     | { ok: false; kind: "hash-io-error"; cause: Error }
     | { ok: false; kind: "hash-mismatch" };
@@ -320,7 +395,12 @@ async function verifyAssetAgainstSums(
 ): Promise<VerifyAssetResult> {
     const sums = await fetchSha256Sums(assets);
     if (sums.kind === "error") {
-        return { ok: false, kind: "sums-error", reason: sums.reason };
+        return {
+            ok: false,
+            kind: "sums-error",
+            reason: sums.reason,
+            retryable: sums.retryable,
+        };
     }
     if (sums.kind === "not-published") {
         return { ok: true, hash: null };

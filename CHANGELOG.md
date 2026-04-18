@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The staging tmp path is now `safeUnlinkSync`-ed before each download, so an attacker-planted symlink in a shared install directory cannot redirect the write to an arbitrary target. Same treatment applies to the sidecar tmp path.
 - GitHub release workflow now creates releases as **draft**, uploads all files (binaries + `SHA256SUMS`), and flips to public in a subsequent step — eliminating the window where `releases/latest` returned a non-draft release with binaries attached but `SHA256SUMS` still uploading (which would let clients fall through to the TLS-only "not-published" install path).
 - `SHA256SUMS` parser now rejects duplicate filename entries (defense-in-depth against tampered mirrors).
+- `release.version` is now validated against the sidecar regex before being written, matching the reader's strictness — closes a writer/reader asymmetry that would be exploitable if the parser's rules ever loosen.
+- Concurrent-launch race on staged-update commit: the window between "sidecar committed" and "binary committed" is now protected by a 60-second mtime grace period. `applyPendingUpdate` no longer reaps an apparently-orphan file that is fresh enough to be a concurrent producer still mid-commit, so simultaneous terminal launches no longer silently discard a correctly hash-verified staged binary.
+- Asset downloads now stream the body through a manual reader that enforces `MAX_ASSET_BYTES` during buffering, not only after — a CDN omitting or falsifying `Content-Length` can no longer balloon RAM before the size check fires. Also propagates the fetch `AbortSignal` into the body read so a slowloris response can't stretch past the 600s timeout.
+- GitHub API fetches now send `User-Agent` (`worktree-cli/vX.Y.Z`), `Accept: application/vnd.github+json`, and `X-GitHub-Api-Version: 2022-11-28`. Setting `GITHUB_TOKEN` in the environment raises the rate limit from 60/hr (anonymous) to 5000/hr (authenticated).
+- `isAutoUpdateDisabled` now fails closed on broken `~/.worktreerc` — a typo'd config no longer silently re-enables auto-update against a user's explicit opt-out.
 
 ### Fixed
 
@@ -45,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Probe-timeout failures now surface as `timed out after 2000ms` instead of the opaque `exit null`.
 - Network errors from `fetchLatestRelease`/`downloadAsset` now preserve the underlying errno chain via `Error.cause`, so callers can classify failures accurately.
 - The background update child is now spawned with `detached: true` (POSIX `setsid()`), so a slow download isn't cut short when the user's shell/terminal exits — the child finishes the check in its own session.
+- `applyPendingUpdate`'s outer catch now rethrows non-errno errors so programmer bugs surface with a stack trace via Bun's unhandled handler instead of being silently reduced to a dim warning. Matches the discipline in `scheduleBackgroundUpdateCheck`.
+- The detached background-check child's stderr is now appended to `~/.cache/worktree-cli/last-error` (previously `"ignore"`). Unhandled throws from `runBackgroundUpdateCheck` now surface a full stack trace on the next foreground launch instead of failing silently. The internal command handler also wraps the run in a top-level try/catch that appends a panic trace before exiting non-zero.
+- Parent's stderr file descriptor is now closed in a `finally` block, so a synchronous `Bun.spawn` failure (`EMFILE`, `EPERM`, `EAGAIN`) no longer leaks the fd on every foreground launch.
+- Empty catches in the log-write helpers (`appendLastError`, `rotateErrorLogIfOversized`) now emit a one-shot dim stderr warning if `~/.cache/worktree-cli/last-error` itself is unwritable — diagnostics-of-diagnostics can no longer disappear silently.
+- `fetchSha256Sums` error results now include a `retryable` boolean distinguishing transient (5xx, network) failures from permanent (4xx) ones; callers can use the hint to choose retry semantics without re-inspecting status strings.
+
+### Tests
+
+- Added coverage for `verifyAssetAgainstSums` across all six result shapes (legacy, normal, 5xx retryable, 4xx permanent, missing-entry, hash-mismatch, hash-io-error) via stubbed `fetch` and a precomputed-hash asset file — pins the tri-state safety contract against future refactors.
+- Added coverage for `parseSha256Sums` duplicate-filename rejection (defense-in-depth against tampered mirrors).
 
 ## [1.2.0] - 2026-04-17
 

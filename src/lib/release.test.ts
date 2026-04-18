@@ -1,5 +1,13 @@
-import { describe, expect, it } from "bun:test";
-import { compareVersions, parseSha256Sums } from "./release";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+    compareVersions,
+    parseSha256Sums,
+    verifyAssetAgainstSums,
+    type ReleaseAsset,
+} from "./release";
 
 describe("compareVersions", () => {
     it("returns 0 for equal versions", () => {
@@ -94,5 +102,162 @@ describe("parseSha256Sums", () => {
         ].join("\n");
         const result = parseSha256Sums(text);
         expect(Object.keys(result)).toEqual(["worktree-linux-x64"]);
+    });
+
+    it("rejects duplicate filename entries with different hashes", () => {
+        const dupe = [
+            "a".repeat(64) + "  worktree-darwin-arm64",
+            "b".repeat(64) + "  worktree-darwin-arm64",
+        ].join("\n");
+        expect(() => parseSha256Sums(dupe)).toThrow(/Duplicate/);
+    });
+});
+
+describe("verifyAssetAgainstSums", () => {
+    const ASSET_BYTES = new Uint8Array([
+        0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64,
+    ]);
+    // Precomputed SHA256 of "hello world" (ASSET_BYTES) — avoids runtime
+    // dependence on Bun.CryptoHasher in test setup.
+    const ASSET_SHA =
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    const ASSET_NAME = "worktree-darwin-arm64";
+
+    let tmpFile: string;
+    let originalFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+        tmpFile = path.join(
+            os.tmpdir(),
+            `verify-test-${process.pid}-${Date.now()}`
+        );
+        fs.writeFileSync(tmpFile, ASSET_BYTES);
+        originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = originalFetch;
+        try {
+            fs.unlinkSync(tmpFile);
+        } catch {
+            // best-effort cleanup
+        }
+    });
+
+    function makeAsset(name: string): ReleaseAsset {
+        return {
+            name,
+            browser_download_url: `https://example.invalid/${name}`,
+        };
+    }
+
+    function resolveFetchUrl(input: RequestInfo | URL): string {
+        if (typeof input === "string") return input;
+        if (input instanceof URL) return input.toString();
+        return input.url;
+    }
+
+    function stubFetch(handler: (url: string) => Response): void {
+        globalThis.fetch = async function (
+            input: RequestInfo | URL
+        ): Promise<Response> {
+            return handler(resolveFetchUrl(input));
+        } as typeof globalThis.fetch;
+    }
+
+    it("returns ok with null hash when SHA256SUMS is not published (legacy)", async () => {
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+        ]);
+        expect(result).toEqual({ ok: true, hash: null });
+    });
+
+    it("returns ok with lowercase hex when SHA256SUMS contains the entry", async () => {
+        const sumsBody = `${ASSET_SHA}  ${ASSET_NAME}\n`;
+        stubFetch(function () {
+            return new Response(sumsBody, { status: 200 });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result).toEqual({ ok: true, hash: ASSET_SHA });
+    });
+
+    it("returns sums-error with retryable flag when SHA256SUMS fetch fails 5xx", async () => {
+        stubFetch(function () {
+            return new Response("bad gateway", {
+                status: 502,
+                statusText: "Bad Gateway",
+            });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("sums-error");
+        if (result.kind !== "sums-error") return;
+        expect(result.retryable).toBe(true);
+        expect(result.reason).toContain("502");
+    });
+
+    it("returns sums-error marked non-retryable on 4xx (permanent)", async () => {
+        stubFetch(function () {
+            return new Response("not found", {
+                status: 404,
+                statusText: "Not Found",
+            });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("sums-error");
+        if (result.kind !== "sums-error") return;
+        expect(result.retryable).toBe(false);
+    });
+
+    it("returns missing-entry when SHA256SUMS exists but has no row for asset", async () => {
+        const sumsBody = `${ASSET_SHA}  some-other-asset\n`;
+        stubFetch(function () {
+            return new Response(sumsBody, { status: 200 });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result).toEqual({ ok: false, kind: "missing-entry" });
+    });
+
+    it("returns hash-mismatch when entry exists but content differs", async () => {
+        const wrongHash = "0".repeat(64);
+        const sumsBody = `${wrongHash}  ${ASSET_NAME}\n`;
+        stubFetch(function () {
+            return new Response(sumsBody, { status: 200 });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result).toEqual({ ok: false, kind: "hash-mismatch" });
+    });
+
+    it("returns hash-io-error when the binary file is unreadable", async () => {
+        const sumsBody = `${ASSET_SHA}  ${ASSET_NAME}\n`;
+        stubFetch(function () {
+            return new Response(sumsBody, { status: 200 });
+        });
+        const result = await verifyAssetAgainstSums(
+            "/nonexistent/path/file.bin",
+            ASSET_NAME,
+            [makeAsset(ASSET_NAME), makeAsset("SHA256SUMS")]
+        );
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("hash-io-error");
     });
 });
