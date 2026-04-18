@@ -178,6 +178,10 @@ function applyPendingUpdate(): void {
 
         fs.renameSync(stagedPath, process.execPath);
         safeUnlinkSync(metaPath);
+        // Bump the throttle so the sibling scheduleBackgroundUpdateCheck() in
+        // src/index.ts doesn't spawn a redundant child-check immediately after
+        // a just-applied update — the new binary is already current.
+        recordCheckCompleted();
 
         const { GREEN, BOLD, RESET } = COLORS;
         console.error(
