@@ -17,6 +17,10 @@ import {
     isStandalone,
     verifyAssetAgainstSums,
 } from "../lib/release";
+import {
+    cleanupStagedArtifacts,
+    recordCheckCompleted,
+} from "../lib/auto-update";
 
 export const updateCommand = command({
     name: "update",
@@ -89,7 +93,9 @@ export const updateCommand = command({
         if (dlError) {
             await safeUnlink(tmpPath);
             if (classifyWriteError(dlError) !== null) {
-                printError("Permission denied. Try: sudo worktree update");
+                printError(
+                    `Permission denied (${deepestMessage(dlError)}). Try: sudo worktree update`
+                );
             } else {
                 printError(deepestMessage(dlError));
             }
@@ -145,7 +151,9 @@ export const updateCommand = command({
         if (renameError) {
             await safeUnlink(tmpPath);
             if (classifyWriteError(renameError) !== null) {
-                printError("Permission denied. Try: sudo worktree update");
+                printError(
+                    `Permission denied (${deepestMessage(renameError)}). Try: sudo worktree update`
+                );
             } else {
                 printError(
                     `Failed to replace binary: ${deepestMessage(renameError)}`
@@ -153,6 +161,12 @@ export const updateCommand = command({
             }
             process.exit(EXIT_CODES.ERROR);
         }
+
+        // Foreground update succeeded — invalidate any pending background
+        // stage so the next launch doesn't silently downgrade us by applying
+        // an older staged version. Bump the throttle for the same reason.
+        cleanupStagedArtifacts();
+        recordCheckCompleted();
 
         const { BOLD, GREEN, DIM, RESET } = COLORS;
         console.error("");

@@ -62,6 +62,14 @@ function ensureCacheDir(): void {
 }
 
 let hasWarnedAboutLogFailure = false;
+// Process-scoped latch: once the throttle file (last-check) becomes
+// unwritable, every subsequent recordCheckCompleted within this process
+// short-circuits. Without the latch, scheduleBackgroundUpdateCheck would
+// re-spawn the detached child on every launch (parent reads → no record →
+// spawn → child writes → write fails → retry next launch), hammering
+// GitHub's API. See F11 in PR review.
+let hasCacheWriteFailed = false;
+let hasWarnedAboutCacheWriteFailureOnce = false;
 
 function warnLogFailureOnce(reason: string): void {
     if (hasWarnedAboutLogFailure) return;
@@ -69,6 +77,15 @@ function warnLogFailureOnce(reason: string): void {
     const { DIM, RESET } = COLORS;
     console.error(
         `${DIM}worktree: auto-update error log unwritable (${reason}) — diagnostics unavailable${RESET}`
+    );
+}
+
+function warnCacheWriteFailureOnce(reason: string): void {
+    if (hasWarnedAboutCacheWriteFailureOnce) return;
+    hasWarnedAboutCacheWriteFailureOnce = true;
+    const { DIM, RESET } = COLORS;
+    console.error(
+        `${DIM}worktree: auto-update throttle cache unwritable (${reason}) — disabling auto-update for this process${RESET}`
     );
 }
 
@@ -207,6 +224,31 @@ function applyPendingUpdate(): void {
             return;
         }
 
+        // Block silent downgrade: a stage from a previous background check
+        // can be older than the running binary if the user ran `worktree
+        // update` (foreground) in between. Without this gate, the apply
+        // path would silently revert to the older staged version.
+        const stageCmp = compareVersions(pkg.version, meta.version);
+        if (stageCmp > 0) {
+            // Strictly older stage — discard AND burn the throttle so we
+            // don't immediately re-stage the same older release.
+            cleanupStagedArtifacts();
+            appendLastError(
+                "apply",
+                `discarded stale stage v${meta.version} (running v${pkg.version})`
+            );
+            recordCheckCompleted();
+            return;
+        }
+        if (stageCmp === 0) {
+            // Same version (cleanup race from a prior apply, or foreground
+            // update wrote a stage matching what's already installed). Just
+            // discard — don't bump the throttle, let the next launch find
+            // genuinely-newer releases on its normal cadence.
+            cleanupStagedArtifacts();
+            return;
+        }
+
         const verify = verifyBinaryHashSync(stagedPath, meta.sha256);
         if (!verify.ok) {
             cleanupStagedArtifacts();
@@ -312,13 +354,21 @@ async function readLastCheckMs(): Promise<number | null> {
 async function isAutoUpdateDisabled(): Promise<boolean> {
     if (process.env.WORKTREE_NO_UPDATE === "1") return true;
     // shouldAutoUpdate fails CLOSED on broken ~/.worktreerc so a typo'd
-    // config doesn't silently override a user's intended opt-out.
-    return !(await shouldAutoUpdate());
+    // config doesn't silently override a user's intended opt-out. Pass
+    // appendLastError so the user can discover *why* it's disabled — without
+    // this hook, a typo'd AUTO_UPDATE silently turns off updates forever.
+    return !(await shouldAutoUpdate(function (msg) {
+        appendLastError("check", msg);
+    }));
 }
 
 async function scheduleBackgroundUpdateCheck(): Promise<void> {
     try {
         if (!isStandalone()) return;
+        // If recordCheckCompleted has already failed in this process, the
+        // child would also fail — skip the spawn to avoid burning the API
+        // and leaving stale stage artifacts.
+        if (hasCacheWriteFailed) return;
         if (await isAutoUpdateDisabled()) return;
 
         const lastCheck = await readLastCheckMs();
@@ -376,12 +426,17 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
 }
 
 function recordCheckCompleted(): void {
+    if (hasCacheWriteFailed) return;
     const { error } = tryCatchSync(function () {
         ensureCacheDir();
         fs.writeFileSync(getLastCheckPath(), String(Date.now()));
     });
     if (error) {
+        // Latch process-wide so the next call doesn't re-attempt (and so
+        // scheduleBackgroundUpdateCheck can short-circuit before spawning).
+        hasCacheWriteFailed = true;
         appendLastError("check", `last-check write: ${error.message}`);
+        warnCacheWriteFailureOnce(error.message);
     }
 }
 
@@ -453,18 +508,30 @@ async function runBackgroundUpdateCheck(): Promise<void> {
                 "check",
                 `SHA256SUMS fetch failed — refusing to stage: ${verify.reason}`
             );
+            // Burn the throttle for permanent failures (404, parse error,
+            // host-pin rejection); transient failures (5xx, 429, 403) keep
+            // retrying on the next launch.
+            if (!verify.retryable) {
+                recordCheckCompleted();
+            }
         } else if (verify.kind === "missing-entry") {
             appendLastError(
                 "check",
                 `SHA256SUMS missing entry for ${assetName}`
             );
+            // Permanent — same release won't grow a missing entry.
+            recordCheckCompleted();
         } else if (verify.kind === "hash-io-error") {
+            // Local IO can be transient (disk full mid-write); don't burn
+            // the throttle.
             appendLastError(
                 "check",
                 `hash io-error for ${assetName}: ${verify.cause.message}`
             );
         } else {
             appendLastError("check", `hash mismatch for ${assetName}`);
+            // Permanent — same release won't change its hash.
+            recordCheckCompleted();
         }
         return;
     }
@@ -539,7 +606,13 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     });
     if (metaWriteError) {
         safeUnlinkSync(tmpPath);
+        safeUnlinkSync(metaTmpPath);
         appendLastError("check", `sidecar write: ${metaWriteError.message}`);
+        // Structural permission/readonly errors don't fix themselves on retry
+        // — burn the throttle so we don't re-download on every launch.
+        if (classifyWriteError(metaWriteError) !== null) {
+            recordCheckCompleted();
+        }
         return;
     }
     const { error: metaRenameError } = tryCatchSync(function () {
@@ -549,6 +622,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         safeUnlinkSync(tmpPath);
         safeUnlinkSync(metaTmpPath);
         appendLastError("check", `sidecar commit: ${metaRenameError.message}`);
+        if (classifyWriteError(metaRenameError) !== null) {
+            recordCheckCompleted();
+        }
         return;
     }
 
@@ -559,6 +635,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
         safeUnlinkSync(tmpPath);
         safeUnlinkSync(getMetaSidecarPath());
         appendLastError("check", `stage: ${renameError.message}`);
+        if (classifyWriteError(renameError) !== null) {
+            recordCheckCompleted();
+        }
         return;
     }
 
@@ -567,11 +646,15 @@ async function runBackgroundUpdateCheck(): Promise<void> {
 
 type ProbeResult = { ok: true } | { ok: false; reason: string };
 
+const PROBE_VERSION_PATTERN = /\d+\.\d+\.\d+/;
+
 function probeBinaryRuns(filePath: string): ProbeResult {
     const { data: result, error } = tryCatchSync(function () {
         return Bun.spawnSync({
             cmd: [filePath, "--version"],
-            stdout: "ignore",
+            // Capture stdout so we can verify the binary actually printed a
+            // version string — exit-0-with-garbage would otherwise pass.
+            stdout: "pipe",
             stderr: "pipe",
             timeout: PROBE_TIMEOUT_MS,
             // Disable auto-update in the probe child — otherwise its top-level
@@ -595,18 +678,29 @@ function probeBinaryRuns(filePath: string): ProbeResult {
         };
     }
     if (result.exitCode !== 0) {
-        const stderr = decodeProbeStderr(result.stderr);
+        const stderr = decodeProbeStream(result.stderr);
         const base = `exit ${result.exitCode}`;
         return { ok: false, reason: stderr ? `${base}: ${stderr}` : base };
+    }
+    const stdout = decodeProbeStream(result.stdout);
+    if (!PROBE_VERSION_PATTERN.test(stdout)) {
+        const truncated = stdout.slice(0, 80);
+        return {
+            ok: false,
+            reason: `version output did not match expected format: ${JSON.stringify(truncated)}`,
+        };
     }
     return { ok: true };
 }
 
-function decodeProbeStderr(stderr: unknown): string {
-    if (!(stderr instanceof Uint8Array) && !(stderr instanceof Buffer)) {
-        return "";
+function decodeProbeStream(stream: unknown): string {
+    if (!(stream instanceof Uint8Array) && !(stream instanceof Buffer)) {
+        // Future Bun API change could surface stream as ReadableStream/string
+        // — return a debuggable marker instead of "" so the regression is
+        // visible in last-error rather than silently degrading diagnostics.
+        return `<probe stream type=${typeof stream}>`;
     }
-    const bytes = stderr instanceof Buffer ? new Uint8Array(stderr) : stderr;
+    const bytes = stream instanceof Buffer ? new Uint8Array(stream) : stream;
     const truncated = bytes.slice(0, PROBE_STDERR_TRUNCATE_BYTES);
     return new TextDecoder().decode(truncated).trim();
 }
@@ -614,6 +708,8 @@ function decodeProbeStderr(stderr: unknown): string {
 export {
     appendBackgroundCheckPanic,
     applyPendingUpdate,
+    cleanupStagedArtifacts,
+    recordCheckCompleted,
     scheduleBackgroundUpdateCheck,
     runBackgroundUpdateCheck,
     INTERNAL_CHECK_SUBCOMMAND,

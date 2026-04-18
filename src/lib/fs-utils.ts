@@ -34,18 +34,29 @@ function safeUnlinkSync(filePath: string): void {
     }
 }
 
-type WriteErrorCode = "EACCES" | "EPERM" | "EROFS";
+type WriteErrorCode = "EACCES" | "EPERM" | "EROFS" | "EBUSY" | "ETXTBSY";
 
 // release.ts wraps errno errors as `new Error(msg, { cause })` — walk the
 // cause chain so the "binary directory not writable" branch fires even
-// when the top-level Error lacks a .code field.
+// when the top-level Error lacks a .code field. EBUSY (Windows: file
+// locked) and ETXTBSY (Linux: text file busy) are included because they
+// behave like permanent failures from the auto-updater's POV — retry on
+// every launch would just re-download the same blob and re-fail.
+const WRITE_ERROR_CODES = new Set([
+    "EACCES",
+    "EPERM",
+    "EROFS",
+    "EBUSY",
+    "ETXTBSY",
+]);
+
 function classifyWriteError(error: unknown): WriteErrorCode | null {
     let cur: unknown = error;
     while (cur instanceof Error) {
         if ("code" in cur) {
             const code = (cur as NodeJS.ErrnoException).code;
-            if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
-                return code;
+            if (code !== undefined && WRITE_ERROR_CODES.has(code)) {
+                return code as WriteErrorCode;
             }
         }
         cur = cur.cause;

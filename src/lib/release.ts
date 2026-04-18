@@ -6,6 +6,32 @@ import pkg from "../../package.json";
 const REPO = "bhagyamudgal/worktree-cli";
 const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
 
+// Defense in depth: even though browser_download_url comes from a trusted
+// GitHub API JSON, host-pin the fetch so a future CDN substitution or
+// release-asset compromise can't redirect downloads to an attacker-chosen
+// origin. api.github.com serves the release JSON; objects.githubusercontent
+// .com / github-releases.githubusercontent.com / release-assets.githubuser
+// content.com host the binary assets; codeload.github.com handles a
+// fallback path; github.com handles redirects.
+const ALLOWED_RELEASE_HOSTS = new Set([
+    "api.github.com",
+    "github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+]);
+
+function isAllowedReleaseHost(urlString: string): boolean {
+    const { data: parsed } = tryCatchSync(function () {
+        return new URL(urlString);
+    });
+    if (!parsed) return false;
+    return ALLOWED_RELEASE_HOSTS.has(parsed.host);
+}
+
+const RELEASE_TAG_PATTERN = /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?$/;
+
 // GitHub REST API requires a User-Agent. Default Bun UA works today but is
 // fragile under future GitHub policy. Identifying as worktree-cli also
 // makes this client traceable in logs if something ever misbehaves.
@@ -126,6 +152,11 @@ async function withTimeout<T>(
     timeoutMs: number,
     handler: (response: Response) => Promise<T>
 ): Promise<T> {
+    if (!isAllowedReleaseHost(url)) {
+        throw new Error(
+            `Refused to fetch URL with disallowed host: ${JSON.stringify(url.slice(0, 120))}`
+        );
+    }
     const controller = new AbortController();
     const timer = setTimeout(function () {
         controller.abort();
@@ -135,6 +166,16 @@ async function withTimeout<T>(
             signal: controller.signal,
             headers: buildGitHubHeaders(),
         });
+        // Re-validate the post-redirect URL: GitHub release downloads always
+        // bounce through 302 → objects.githubusercontent.com, so the initial
+        // host-pin alone is bypassable by anyone who can MITM the first hop
+        // and inject `Location: https://attacker.example/`. Trust only what
+        // the redirect chain settled on.
+        if (response.url && !isAllowedReleaseHost(response.url)) {
+            throw new Error(
+                `Refused redirect to disallowed host: ${JSON.stringify(response.url.slice(0, 120))}`
+            );
+        }
         return await handler(response);
     } finally {
         clearTimeout(timer);
@@ -154,6 +195,15 @@ async function fetchLatestRelease(
             const json = await response.json();
             if (!isReleaseInfo(json)) {
                 throw new Error("Release payload missing tag_name or assets");
+            }
+            // Validate tag shape at the API boundary so a malicious or
+            // misconfigured tag (e.g., "v1.2.3/../evil") can't propagate
+            // through to printError messages, log lines, or any future
+            // path-joining caller.
+            if (!RELEASE_TAG_PATTERN.test(json.tag_name)) {
+                throw new Error(
+                    `Release tag malformed: ${JSON.stringify(json.tag_name.slice(0, 40))}`
+                );
             }
             return {
                 tag: json.tag_name,
@@ -230,6 +280,15 @@ async function downloadAsset(
                     tryCatchSync(function () {
                         reader.releaseLock();
                     });
+                }
+                if (bytesReceived === 0) {
+                    // 200 OK with empty body (CDN edge case, misconfigured
+                    // proxy). Without this guard, Bun.write writes an empty
+                    // file and SHA verification later reports a misleading
+                    // "hash mismatch" instead of the upstream cause.
+                    throw new Error(
+                        `Download ${asset.name} refused: empty response body`
+                    );
                 }
                 const buffer = new Uint8Array(bytesReceived);
                 let offset = 0;
@@ -327,9 +386,11 @@ type Sha256SumsResult =
     | { kind: "error"; reason: string; retryable: boolean };
 
 // 5xx / network errors are retryable (transient CDN or server issues).
-// 4xx responses are permanent (missing asset, auth problem). Callers can
-// use this to decide whether to skip burning the 24h throttle.
+// Most 4xx responses are permanent (missing asset, auth problem), but
+// 403/429 specifically signal rate-limiting (especially for anonymous
+// callers — 60/hr GitHub limit) and ARE transient.
 function isRetryableHttpStatus(status: number): boolean {
+    if (status === 403 || status === 429) return true;
     return status >= 500 && status < 600;
 }
 
@@ -362,7 +423,23 @@ async function fetchSha256Sums(
                         retryable: true,
                     };
                 }
-                return { kind: "ok", sums: parseSha256Sums(text) };
+                // parseSha256Sums throws on duplicate-entry tampering — that
+                // is a permanent integrity failure for THIS release, not a
+                // transient network issue. Catch it inline so it doesn't
+                // collapse into the generic retryable network branch below.
+                const { data: parsed, error: parseError } = tryCatchSync(
+                    function () {
+                        return parseSha256Sums(text);
+                    }
+                );
+                if (parseError) {
+                    return {
+                        kind: "error",
+                        reason: `SHA256SUMS parse: ${parseError.message}`,
+                        retryable: false,
+                    };
+                }
+                return { kind: "ok", sums: parsed };
             }
         )
     );

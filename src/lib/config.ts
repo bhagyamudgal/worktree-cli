@@ -102,6 +102,11 @@ async function readConfigFile(
             `${filePath}:AUTO_UPDATE`,
             `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead.`
         );
+        // Strip the ignored key BEFORE validation; otherwise an invalid value
+        // (e.g. AUTO_UPDATE=junk) throws inside booleanLike and the catch
+        // below falls back to all defaults, silently discarding any valid
+        // DEFAULT_BASE / WORKTREE_DIR from the same file.
+        delete raw.AUTO_UPDATE;
     }
     const { data: parsed, error: parseError } = tryCatchSync(function () {
         return validateConfig(raw);
@@ -120,35 +125,50 @@ async function loadConfig(root: string): Promise<Config> {
     return readConfigFile(path.join(root, ".worktreerc"), "project");
 }
 
-async function loadGlobalConfig(): Promise<Config> {
-    return readConfigFile(path.join(os.homedir(), ".worktreerc"), "global");
-}
-
 // Auto-update reads config on every background check and must fail CLOSED
 // on parse/read errors. The generic readConfigFile falls back to defaults
 // (AUTO_UPDATE: true), which would silently override a user's explicit
 // opt-out whenever their config has a typo. This helper returns the
 // narrow signal "should auto-update fire?" with fail-closed semantics.
-async function shouldAutoUpdate(): Promise<boolean> {
+//
+// `onError` lets the caller (auto-update.ts) record diagnostics to the
+// last-error log so a user with a typo doesn't have auto-update silently
+// disabled forever. Optional to avoid forcing an import on call sites that
+// don't need diagnostics.
+async function shouldAutoUpdate(
+    onError?: (message: string) => void
+): Promise<boolean> {
     const filePath = path.join(os.homedir(), ".worktreerc");
     const file = Bun.file(filePath);
-    const isExists = await file.exists();
+    // file.exists() can throw on EACCES (e.g., parent dir unreadable). Guard
+    // it instead of letting it bubble up and crash the scheduler.
+    const { data: isExists, error: existsError } = await tryCatch(
+        file.exists()
+    );
+    if (existsError) {
+        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
+        return false;
+    }
     if (!isExists) return true;
     const { data: content, error: readError } = await tryCatch(file.text());
-    if (readError) return false;
+    if (readError) {
+        onError?.(
+            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
+        );
+        return false;
+    }
     const raw = parseConfigContent(content);
     const { data: parsed, error: parseError } = tryCatchSync(function () {
         return validateConfig(raw);
     });
-    if (parseError) return false;
+    if (parseError) {
+        onError?.(
+            `~/.worktreerc invalid; auto-update disabled until fixed: ${parseError.message}`
+        );
+        return false;
+    }
     return parsed.AUTO_UPDATE;
 }
 
-export {
-    loadConfig,
-    loadGlobalConfig,
-    parseConfigContent,
-    shouldAutoUpdate,
-    validateConfig,
-};
+export { loadConfig, parseConfigContent, shouldAutoUpdate, validateConfig };
 export type { Config };

@@ -62,13 +62,15 @@ On `remove`, it:
 
 ## Config
 
-The `.worktreerc` file (in the repo root for project settings, in `~/` for user settings) supports:
+`.worktreerc` keys are read from one of two locations depending on the key:
 
-| Key | Description | Example |
-|-----|-------------|---------|
-| `DEFAULT_BASE` | Default base branch for new worktrees | `origin/dev` |
-| `WORKTREE_DIR` | Directory name for worktrees (default: `.worktrees`) | `.worktrees` |
-| `AUTO_UPDATE` | Enable background auto-update checks in `~/.worktreerc` only (default: `true`) | `false` |
+| Key | Description | Where | Example |
+|-----|-------------|-------|---------|
+| `DEFAULT_BASE` | Default base branch for new worktrees | Project (`<repo>/.worktreerc`) | `origin/dev` |
+| `WORKTREE_DIR` | Directory name for worktrees (default: `.worktrees`) | Project (`<repo>/.worktreerc`) | `.worktrees` |
+| `AUTO_UPDATE` | Enable background auto-update checks (default: `true`) | User (`~/.worktreerc`) only | `false` |
+
+`DEFAULT_BASE` and `WORKTREE_DIR` placed in `~/.worktreerc` are ignored — `worktree` reads them from the project file at the repo root only. `AUTO_UPDATE` placed in a project `.worktreerc` is ignored with a warning — it must live in `~/.worktreerc` so it applies across all repos under your control.
 
 ## Alias
 

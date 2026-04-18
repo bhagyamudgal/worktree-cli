@@ -66,6 +66,8 @@ jobs:
                   ls -lh dist/worktree-${{ matrix.target }}
 
             - name: Smoke-test --version
+              env:
+                  WORKTREE_NO_UPDATE: "1"
               run: |
                   chmod +x dist/worktree-${{ matrix.target }}
                   ./dist/worktree-${{ matrix.target }} --version
@@ -95,8 +97,22 @@ jobs:
             - name: Aggregate SHA256SUMS
               run: |
                   cd artifacts
+                  # Fail-fast: if no .sha256 sidecars were downloaded (e.g.,
+                  # an upload-artifact rename regression), the cat below
+                  # would silently produce an empty SHA256SUMS that bricks
+                  # every client's auto-update install.
+                  count=$(ls -1 worktree-*.sha256 2>/dev/null | wc -l | tr -d ' ')
+                  expected=4
+                  if [ "$count" != "$expected" ]; then
+                      echo "expected $expected .sha256 files, got $count" >&2
+                      exit 1
+                  fi
                   cat worktree-*.sha256 > SHA256SUMS
                   rm worktree-*.sha256
+                  if [ ! -s SHA256SUMS ]; then
+                      echo "SHA256SUMS empty after aggregation — abort" >&2
+                      exit 1
+                  fi
                   cat SHA256SUMS
 
             - run: chmod +x artifacts/worktree-*

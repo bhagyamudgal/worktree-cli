@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
     compareVersions,
+    fetchLatestRelease,
     parseSha256Sums,
     verifyAssetAgainstSums,
     type ReleaseAsset,
@@ -111,6 +112,128 @@ describe("parseSha256Sums", () => {
         ].join("\n");
         expect(() => parseSha256Sums(dupe)).toThrow(/Duplicate/);
     });
+
+    it("handles CRLF line endings", () => {
+        const text =
+            "a".repeat(64) +
+            "  worktree-darwin-arm64\r\n" +
+            "b".repeat(64) +
+            "  worktree-linux-x64\r\n";
+        const result = parseSha256Sums(text);
+        expect(result["worktree-darwin-arm64"]).toBe("a".repeat(64));
+        expect(result["worktree-linux-x64"]).toBe("b".repeat(64));
+    });
+
+    it("handles missing trailing newline", () => {
+        const text = "a".repeat(64) + "  worktree-darwin-arm64";
+        const result = parseSha256Sums(text);
+        expect(result["worktree-darwin-arm64"]).toBe("a".repeat(64));
+    });
+
+    it("rejects BSD-tagged-format `SHA256 (file) = hex` (not the format we publish)", () => {
+        const text = `SHA256 (worktree-darwin-arm64) = ${"a".repeat(64)}`;
+        const result = parseSha256Sums(text);
+        // Parser regex doesn't match this format — entry is silently skipped.
+        // Asserting empty result pins the parser's behavior so a future
+        // regression that loosens the regex is caught here instead of
+        // accepting unverified hashes downstream.
+        expect(Object.keys(result)).toEqual([]);
+    });
+});
+
+describe("fetchLatestRelease — JSON-shape boundary", () => {
+    let originalFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+        originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    function stubFetch(handler: () => Response): void {
+        globalThis.fetch = async function (
+            _input: RequestInfo | URL
+        ): Promise<Response> {
+            return handler();
+        } as typeof globalThis.fetch;
+    }
+
+    it("returns parsed release on a valid payload", async () => {
+        stubFetch(function () {
+            return new Response(
+                JSON.stringify({
+                    tag_name: "v1.2.3",
+                    assets: [
+                        {
+                            name: "worktree-darwin-arm64",
+                            browser_download_url:
+                                "https://objects.githubusercontent.com/worktree-darwin-arm64",
+                        },
+                    ],
+                }),
+                { status: 200 }
+            );
+        });
+        const result = await fetchLatestRelease();
+        expect(result.tag).toBe("v1.2.3");
+        expect(result.version).toBe("1.2.3");
+        expect(result.assets).toHaveLength(1);
+    });
+
+    it("throws on missing tag_name", async () => {
+        stubFetch(function () {
+            return new Response(JSON.stringify({ assets: [] }), {
+                status: 200,
+            });
+        });
+        await expect(fetchLatestRelease()).rejects.toThrow(/tag_name|assets/);
+    });
+
+    it("throws on missing assets array", async () => {
+        stubFetch(function () {
+            return new Response(JSON.stringify({ tag_name: "v1.0.0" }), {
+                status: 200,
+            });
+        });
+        await expect(fetchLatestRelease()).rejects.toThrow(/tag_name|assets/);
+    });
+
+    it("throws on assets being a non-array", async () => {
+        stubFetch(function () {
+            return new Response(
+                JSON.stringify({ tag_name: "v1.0.0", assets: "x" }),
+                { status: 200 }
+            );
+        });
+        await expect(fetchLatestRelease()).rejects.toThrow(/tag_name|assets/);
+    });
+
+    it("throws on malformed tag_name (path-traversal-shaped)", async () => {
+        stubFetch(function () {
+            return new Response(
+                JSON.stringify({
+                    tag_name: "v1.2.3/../evil",
+                    assets: [],
+                }),
+                { status: 200 }
+            );
+        });
+        await expect(fetchLatestRelease()).rejects.toThrow(
+            /Release tag malformed/
+        );
+    });
+
+    it("throws on non-2xx HTTP", async () => {
+        stubFetch(function () {
+            return new Response("server error", {
+                status: 500,
+                statusText: "Internal Server Error",
+            });
+        });
+        await expect(fetchLatestRelease()).rejects.toThrow(/500/);
+    });
 });
 
 describe("verifyAssetAgainstSums", () => {
@@ -145,9 +268,11 @@ describe("verifyAssetAgainstSums", () => {
     });
 
     function makeAsset(name: string): ReleaseAsset {
+        // Use an allowlisted host so the host-pin guard inside withTimeout
+        // doesn't reject the request before stubFetch can intercept it.
         return {
             name,
-            browser_download_url: `https://example.invalid/${name}`,
+            browser_download_url: `https://objects.githubusercontent.com/${name}`,
         };
     }
 
@@ -219,6 +344,64 @@ describe("verifyAssetAgainstSums", () => {
         expect(result.kind).toBe("sums-error");
         if (result.kind !== "sums-error") return;
         expect(result.retryable).toBe(false);
+    });
+
+    it("returns sums-error marked retryable on 403 (rate limit)", async () => {
+        stubFetch(function () {
+            return new Response("forbidden", {
+                status: 403,
+                statusText: "Forbidden",
+            });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("sums-error");
+        if (result.kind !== "sums-error") return;
+        // 403/429 are GitHub rate-limit signals — transient, NOT permanent.
+        expect(result.retryable).toBe(true);
+    });
+
+    it("returns sums-error marked retryable on 429 (rate limit)", async () => {
+        stubFetch(function () {
+            return new Response("too many requests", {
+                status: 429,
+                statusText: "Too Many Requests",
+            });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("sums-error");
+        if (result.kind !== "sums-error") return;
+        expect(result.retryable).toBe(true);
+    });
+
+    it("returns non-retryable sums-error when SHA256SUMS contains duplicate entry (tampering)", async () => {
+        const dupeBody = [
+            "a".repeat(64) + "  " + ASSET_NAME,
+            "b".repeat(64) + "  " + ASSET_NAME,
+        ].join("\n");
+        stubFetch(function () {
+            return new Response(dupeBody, { status: 200 });
+        });
+        const result = await verifyAssetAgainstSums(tmpFile, ASSET_NAME, [
+            makeAsset(ASSET_NAME),
+            makeAsset("SHA256SUMS"),
+        ]);
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.kind).toBe("sums-error");
+        if (result.kind !== "sums-error") return;
+        // Duplicate entries are tampering, not transient — must NOT retry.
+        expect(result.retryable).toBe(false);
+        expect(result.reason).toMatch(/parse|Duplicate/);
     });
 
     it("returns missing-entry when SHA256SUMS exists but has no row for asset", async () => {
