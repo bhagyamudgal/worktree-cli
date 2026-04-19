@@ -14,59 +14,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Trimmed verbose auto-update implementation comments; the hardening rationale lives in git history.
-- CI: bumped `actions/checkout`, `actions/upload-artifact`, and `actions/download-artifact` to latest majors (Node.js 24 runtime) to address GitHub's deprecation of Node.js 20 actions.
-- Release binaries now built with `--minify --sourcemap=none` and stripped of debug symbols (`llvm-strip` on Linux, `strip` on macOS). Binary sizes are slightly smaller; functional behavior unchanged.
-- Release workflow smoke-tests each built binary via `--version` before publishing to catch regressions.
-- `AUTO_UPDATE` set in a project `.worktreerc` now warns once that it is ignored — the flag only takes effect in `~/.worktreerc`, matching the README.
-- `readConfigFile` is now fail-open on parse errors (warn + return defaults) for both project and global configs, instead of asymmetrically swallowing for project / propagating for global.
-- SHA256SUMS verification is centralized in a new `verifyAssetAgainstSums` helper; the foreground `update` command and the background check share the same discriminated-union result contract.
+- Release binaries are slightly smaller (minified, debug symbols stripped). No behavioural change.
+- Release workflow smoke-tests each built binary (`--version`) before publishing so a broken build can't reach users.
+- `AUTO_UPDATE` in a project `.worktreerc` now warns once that it is ignored — only `~/.worktreerc` is honoured (matches the README).
+- Global and project config files now behave symmetrically on parse errors: both warn and fall back to defaults.
+- CI: bumped `actions/checkout`, `actions/upload-artifact`, and `actions/download-artifact` to latest majors (Node.js 24 runtime) following GitHub's deprecation of Node.js 20 actions.
 
 ### Security
 
-- SHA256SUMS parser now allocates its result map with `Object.create(null)` to block `__proto__`/`constructor`/`prototype` pollution from a tampered sums file.
-- SHA256 hash comparison now uses `node:crypto.timingSafeEqual` (C-level constant-time) instead of a userland XOR loop that V8/JSC may short-circuit.
-- Release asset downloads now reject responses whose declared `Content-Length` exceeds 200 MB, capping the blast radius of a malicious CDN before SHA verification fires.
-- The staging tmp path is now `safeUnlinkSync`-ed before each download — best-effort defense against a planted symlink in a shared install directory. (Note: this is *not* race-free: an attacker who can write to the binary directory could re-plant the symlink between the unlink and the subsequent write. Closing that race fully would require an `O_EXCL | O_NOFOLLOW` open. Same treatment applies to the sidecar tmp path.)
-- GitHub release workflow now creates releases as **draft**, uploads all files (binaries + `SHA256SUMS`), and flips to public in a subsequent step — eliminating the window where `releases/latest` returned a non-draft release with binaries attached but `SHA256SUMS` still uploading (which would let clients fall through to the TLS-only "not-published" install path).
-- `SHA256SUMS` parser now rejects duplicate filename entries (defense-in-depth against tampered mirrors).
-- `release.version` is now validated against the sidecar regex before being written, matching the reader's strictness — closes a writer/reader asymmetry that would be exploitable if the parser's rules ever loosen.
-- Concurrent-launch race on staged-update commit: the window between "sidecar committed" and "binary committed" is now protected by a 60-second mtime grace period. `applyPendingUpdate` no longer reaps an apparently-orphan file that is fresh enough to be a concurrent producer still mid-commit, so simultaneous terminal launches no longer silently discard a correctly hash-verified staged binary.
-- Asset downloads now stream the body through a manual reader that enforces `MAX_ASSET_BYTES` during buffering, not only after — a CDN omitting or falsifying `Content-Length` can no longer balloon RAM before the size check fires. Also propagates the fetch `AbortSignal` into the body read so a slowloris response can't stretch past the 600s timeout.
-- GitHub API fetches now send `User-Agent` (`worktree-cli/vX.Y.Z`), `Accept: application/vnd.github+json`, and `X-GitHub-Api-Version: 2022-11-28`. Setting `GITHUB_TOKEN` in the environment raises the rate limit from 60/hr (anonymous) to 5000/hr (authenticated).
-- `isAutoUpdateDisabled` now fails closed on broken `~/.worktreerc` — a typo'd config no longer silently re-enables auto-update against a user's explicit opt-out.
-- Release-channel fetches now follow redirects manually, validating each hop's host against the allowlist *before* connecting. A malicious `Location:` injection on the first hop can no longer reach an arbitrary host, and the `GITHUB_TOKEN` is stripped on any cross-origin hop and not re-attached even if a later hop bounces back to the origin.
-- Applying a staged update now also respects `AUTO_UPDATE=false` in `~/.worktreerc`. Previously, a user who opted out via config after a binary was already staged would still get the staged binary installed on the next launch; now the apply path fails closed on the same config read as the background scheduler.
+- Release downloads are verified against `SHA256SUMS` using a constant-time hash comparison before being made executable.
+- Release-channel fetches are restricted to an allowlist of GitHub-owned hosts, validated on every redirect hop **before** the runtime connects. A malicious `Location:` injection on the first hop can no longer reach an arbitrary host. `GITHUB_TOKEN` is stripped on any cross-origin hop and not re-attached if the chain bounces back to the origin.
+- Release assets with a declared `Content-Length` over 200 MB are rejected outright, and byte-counts are enforced as the body streams in — a CDN omitting or forging `Content-Length` cannot exhaust memory before the size check fires. The download timeout is honoured throughout the body read so a slowloris response can't stretch past it.
+- The staging tmp path is pre-unlinked before each download as a best-effort defense against a planted symlink in a shared install directory. (Not race-free — a writable install directory still allows re-planting between the unlink and the subsequent write. Closing that race fully would require `O_EXCL | O_NOFOLLOW`. Same treatment applies to the sidecar tmp path.)
+- GitHub releases are now published as **draft**, uploaded with all files (binaries + `SHA256SUMS`), and flipped to public in a subsequent step — eliminating the window where `releases/latest` exposed a public release with binaries but no sums, forcing clients onto the TLS-only install path.
+- `SHA256SUMS` parser rejects duplicate filename entries and is immune to prototype-pollution from a tampered sums file.
+- Release tag and staged version strings are validated against the same strict regex at the writer and the reader, so a crafted tag can't propagate into paths, logs, or sidecar metadata.
+- Concurrent launches no longer discard a correctly-staged update mid-commit: a 60-second mtime grace window distinguishes a concurrent producer from a real orphan.
+- Auto-update now fails **closed** on a malformed `~/.worktreerc` — a typo can no longer silently re-enable auto-update against an explicit opt-out.
+- Applying a staged update now also respects `AUTO_UPDATE=false` in `~/.worktreerc`. Previously, a user who opted out in config after a binary was already staged would still get the staged binary installed on the next launch.
+- GitHub API fetches now send a proper `User-Agent` (`worktree-cli/vX.Y.Z`), `Accept: application/vnd.github+json`, and `X-GitHub-Api-Version` header. Setting `GITHUB_TOKEN` in the environment raises the rate limit from 60/hr (anonymous) to 5000/hr (authenticated).
 
 ### Fixed
 
-- macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** in the release workflow after stripping. Prior releases shipped unsigned binaries, which Apple Silicon (arm64) macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
-- Startup hash verification of a staged binary now reads in 64 KB chunks instead of buffering the full binary in memory, keeping peak RSS flat on every launch.
-- Asset-download phase now streams chunks directly to disk via `fs.createWriteStream`, enforcing the byte cap as bytes arrive. Replaces a buffered-then-copied path that held the whole response (~50 MB for current binaries, up to the 200 MB cap) in memory twice before writing.
-- `downloadAsset` now cleans up its own partial write on error so callers can treat the destination path as all-or-nothing.
-- Background updater now throttles persistent structural failures on download and `chmod` (e.g., `EACCES`/`EROFS`), matching the existing sidecar write/rename branches. A root-owned install directory no longer burns the GitHub API quota on every launch.
-- Background updater no longer spawns a blind detached child when the cache-log file descriptor can't be opened — the same unwritable-cache condition that short-circuits the throttle now also short-circuits the spawn.
-- First-ever auto-update launch no longer prints a spurious "auto-update error log unwritable" warning caused by `statSync` returning `ENOENT` on a not-yet-created log.
-- A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle — the next launch retries so users on the lagging arch get updated promptly once the asset is uploaded.
-- `worktree auto-update` failures caused by a read-only binary directory (`EACCES`/`EPERM`/`EROFS` on the atomic swap) now clean up the staged artifacts and print a one-line `run "sudo worktree update"` hint on stderr instead of looping on every launch.
-- Non-permission rename failures (`ETXTBSY`, `EXDEV`, `ENOSPC`, `EIO`, `EBUSY`) now cleanup the staged artifacts too, so a persistent rename failure can't pin a warning on every single launch.
-- Orphan `.worktree.next.meta` sidecar left by an interrupted background stage is now cleaned up on the next launch instead of lingering indefinitely.
-- Background check's 24h throttle no longer thrashes if the cache file's `.exists()` probe errors out — the error is logged and the check proceeds as if no check has run, matching the symmetric `.text()` read-error behavior.
-- `worktree update` now recognises `EACCES`/`EPERM`/`EROFS` on the download and rename steps (previously only `EACCES`) and surfaces the deepest `Error.cause` message so users see the real errno (`ENOTFOUND`, `ECONNRESET`, etc.) instead of the generic wrapper.
-- Unlink errors in cleanup paths now distinguish `ENOENT` (silent, expected) from real failures (`EACCES`, `EPERM`, etc.) — real failures emit a dim stderr warning instead of being silently swallowed.
-- Probe-timeout failures now surface as `timed out after 2000ms` instead of the opaque `exit null`.
-- Network errors from `fetchLatestRelease`/`downloadAsset` now preserve the underlying errno chain via `Error.cause`, so callers can classify failures accurately.
-- The background update child is now spawned with `detached: true` (POSIX `setsid()`), so a slow download isn't cut short when the user's shell/terminal exits — the child finishes the check in its own session.
-- `applyPendingUpdate`'s outer catch now rethrows non-errno errors so programmer bugs surface with a stack trace via Bun's unhandled handler instead of being silently reduced to a dim warning. Matches the discipline in `scheduleBackgroundUpdateCheck`.
-- The detached background-check child's stderr is now appended to `~/.cache/worktree-cli/last-error` (previously `"ignore"`). Unhandled throws from `runBackgroundUpdateCheck` now surface a full stack trace on the next foreground launch instead of failing silently. The internal command handler also wraps the run in a top-level try/catch that appends a panic trace before exiting non-zero.
-- Parent's stderr file descriptor is now closed in a `finally` block, so a synchronous `Bun.spawn` failure (`EMFILE`, `EPERM`, `EAGAIN`) no longer leaks the fd on every foreground launch.
-- Empty catches in the log-write helpers (`appendLastError`, `rotateErrorLogIfOversized`) now emit a one-shot dim stderr warning if `~/.cache/worktree-cli/last-error` itself is unwritable — diagnostics-of-diagnostics can no longer disappear silently.
-- `fetchSha256Sums` error results now include a `retryable` boolean distinguishing transient (5xx, network) failures from permanent (4xx) ones; callers can use the hint to choose retry semantics without re-inspecting status strings.
+- macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** after stripping. Prior releases shipped unsigned binaries, which Apple Silicon macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
+- Auto-update no longer buffers the full binary in memory during download or verification — peak memory stays flat regardless of binary size.
+- A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle; the next launch retries so users on the lagging arch get updated once the asset is uploaded.
+- `worktree update` and the background auto-updater now recognise the full set of write-permission errors on download, `chmod`, and rename (not just `EACCES`), clean up any partial staged files, and print a one-line `run "sudo worktree update"` hint instead of looping on every launch.
+- Persistent structural failures (read-only install directory, busy binary, disk full, filesystem boundary) now throttle the background check so a stuck install directory no longer burns the GitHub API quota on every launch.
+- Orphan staging artifacts left by an interrupted background update are cleaned up on the next launch instead of lingering indefinitely.
+- First-ever auto-update launch no longer prints a spurious "error log unwritable" warning on a not-yet-created log file.
+- Background updater no longer spawns a blind detached child when the cache log can't be opened — the same condition that short-circuits the throttle now also short-circuits the spawn, and the parent's copy of the log fd is released even if the spawn itself throws synchronously.
+- Probe-timeout failures on a freshly-downloaded binary now surface as `timed out after 2000ms` instead of the opaque `exit null`.
+- Network errors during update checks now preserve the underlying errno (`ENOTFOUND`, `ECONNRESET`, `ETIMEDOUT`, etc.) instead of being hidden behind a generic wrapper.
+- The background update child is detached (POSIX `setsid`) so a slow download isn't killed when the user's shell or terminal exits.
+- Unhandled throws from the background update path now write a full stack trace to `~/.cache/worktree-cli/last-error` and surface on the next foreground launch instead of failing silently.
+- Unlink errors during cleanup distinguish "already gone" from real failures — only real failures emit a warning.
 
 ### Tests
 
-- Added coverage for `verifyAssetAgainstSums` across all six result shapes (legacy, normal, 5xx retryable, 4xx permanent, missing-entry, hash-mismatch, hash-io-error) via stubbed `fetch` and a precomputed-hash asset file — pins the tri-state safety contract against future refactors.
-- Added coverage for `parseSha256Sums` duplicate-filename rejection (defense-in-depth against tampered mirrors).
+- Added coverage for the SHA256 verification flow across all result shapes (legacy, normal, transient, permanent, missing-entry, hash-mismatch, hash-io-error) using stubbed `fetch` and a precomputed-hash asset file — pins the safety contract against future refactors.
+- Added coverage for the `SHA256SUMS` parser's duplicate-entry rejection.
 
 ## [1.2.0] - 2026-04-17
 
