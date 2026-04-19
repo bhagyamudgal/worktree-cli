@@ -1,4 +1,5 @@
 import { z } from "zod";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_WORKTREE_DIR } from "./constants";
@@ -122,29 +123,13 @@ async function loadConfig(root: string): Promise<Config> {
     return readConfigFile(path.join(root, ".worktreerc"), "project");
 }
 
-// Fail CLOSED on parse/read errors so a typo can't silently override opt-out.
-// `onError` threads diagnostics so users discover *why* auto-update is disabled.
-async function shouldAutoUpdate(
-    onError?: (message: string) => void
-): Promise<boolean> {
-    const filePath = path.join(os.homedir(), ".worktreerc");
-    const file = Bun.file(filePath);
-    // `file.exists()` can throw EACCES; guard to avoid crashing the scheduler.
-    const { data: isExists, error: existsError } = await tryCatch(
-        file.exists()
-    );
-    if (existsError) {
-        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
-        return false;
-    }
-    if (!isExists) return true;
-    const { data: content, error: readError } = await tryCatch(file.text());
-    if (readError) {
-        onError?.(
-            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
-        );
-        return false;
-    }
+type AutoUpdateOnError = (message: string) => void;
+
+function decideAutoUpdateFromContent(
+    content: string | null,
+    onError?: AutoUpdateOnError
+): boolean {
+    if (content === null) return true;
     const raw = parseConfigContent(content);
     const { data: parsed, error: parseError } = tryCatchSync(function () {
         return validateConfig(raw);
@@ -158,5 +143,58 @@ async function shouldAutoUpdate(
     return parsed.AUTO_UPDATE;
 }
 
-export { loadConfig, parseConfigContent, shouldAutoUpdate, validateConfig };
+// Fail CLOSED on parse/read errors so a typo can't silently override opt-out.
+// `onError` threads diagnostics so users discover *why* auto-update is disabled.
+async function shouldAutoUpdate(onError?: AutoUpdateOnError): Promise<boolean> {
+    const filePath = path.join(os.homedir(), ".worktreerc");
+    const file = Bun.file(filePath);
+    // `file.exists()` can throw EACCES; guard to avoid crashing the scheduler.
+    const { data: isExists, error: existsError } = await tryCatch(
+        file.exists()
+    );
+    if (existsError) {
+        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
+        return false;
+    }
+    if (!isExists) return decideAutoUpdateFromContent(null, onError);
+    const { data: content, error: readError } = await tryCatch(file.text());
+    if (readError) {
+        onError?.(
+            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
+        );
+        return false;
+    }
+    return decideAutoUpdateFromContent(content, onError);
+}
+
+// Sync twin used at startup by applyPendingUpdate (before brocli.run / top-level await).
+function shouldAutoUpdateSync(onError?: AutoUpdateOnError): boolean {
+    const filePath = path.join(os.homedir(), ".worktreerc");
+    const { data: isExists, error: existsError } = tryCatchSync(function () {
+        return fs.existsSync(filePath);
+    });
+    if (existsError) {
+        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
+        return false;
+    }
+    if (!isExists) return decideAutoUpdateFromContent(null, onError);
+    const { data: content, error: readError } = tryCatchSync(function () {
+        return fs.readFileSync(filePath, "utf8");
+    });
+    if (readError) {
+        onError?.(
+            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
+        );
+        return false;
+    }
+    return decideAutoUpdateFromContent(content, onError);
+}
+
+export {
+    loadConfig,
+    parseConfigContent,
+    shouldAutoUpdate,
+    shouldAutoUpdateSync,
+    validateConfig,
+};
 export type { Config };

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { shouldAutoUpdate } from "./config";
-import { classifyWriteError, safeUnlinkSync } from "./fs-utils";
+import { shouldAutoUpdate, shouldAutoUpdateSync } from "./config";
+import { classifyWriteError, isEnoent, safeUnlinkSync } from "./fs-utils";
 import {
     compareVersions,
     computeSha256Sync,
@@ -113,6 +113,7 @@ function rotateErrorLogIfOversized(logPath: string): void {
         const kept = lines.slice(-ERROR_LOG_KEEP_LINES).join("\n") + "\n";
         fs.writeFileSync(logPath, kept);
     } catch (error) {
+        if (isEnoent(error)) return;
         warnLogFailureOnce(
             error instanceof Error ? error.message : String(error)
         );
@@ -161,6 +162,11 @@ function isWithinGracePeriod(filePath: string): boolean {
 
 function applyPendingUpdate(): void {
     if (process.env.WORKTREE_NO_UPDATE === "1") return;
+    // Gate on config too: a staged binary must not apply if the user set AUTO_UPDATE=false after it was staged.
+    const configAllows = shouldAutoUpdateSync(function (msg) {
+        appendLastError("apply", msg);
+    });
+    if (!configAllows) return;
     try {
         if (!isStandalone()) return;
         const stagedPath = getStagingPath();
@@ -338,27 +344,34 @@ async function scheduleBackgroundUpdateCheck(): Promise<void> {
 
         // Only the child writes last-check on success, so a failed check never burns the 24h window.
         // Child stderr is funneled to last-error so background panics are visible on the next launch.
-        const { data: stderrFd } = tryCatchSync(function () {
-            ensureCacheDir();
-            return fs.openSync(getLastErrorPath(), "a");
-        });
+        const { data: stderrFd, error: stderrOpenError } = tryCatchSync(
+            function () {
+                ensureCacheDir();
+                return fs.openSync(getLastErrorPath(), "a");
+            }
+        );
+        if (stderrOpenError) {
+            // If we can't capture the child's stderr, don't spawn blind — the
+            // throttle cache lives in the same dir, so it's likely unwritable too.
+            hasCacheWriteFailed = true;
+            warnCacheWriteFailureOnce(stderrOpenError.message);
+            return;
+        }
         try {
             Bun.spawn({
                 cmd: [process.execPath, INTERNAL_CHECK_SUBCOMMAND],
                 stdin: "ignore",
                 stdout: "ignore",
-                stderr: stderrFd ?? "ignore",
+                stderr: stderrFd,
                 // POSIX setsid(): survives terminal close so a slow download isn't SIGHUPed.
                 detached: true,
             }).unref();
         } finally {
             // Close parent's fd copy even if Bun.spawn throws synchronously (else fd leak per launch).
-            if (stderrFd !== null) {
-                const inheritedFd = stderrFd;
-                tryCatchSync(function () {
-                    fs.closeSync(inheritedFd);
-                });
-            }
+            const inheritedFd = stderrFd;
+            tryCatchSync(function () {
+                fs.closeSync(inheritedFd);
+            });
         }
     } catch (error) {
         // Swallow errno-style only; let programmer bugs propagate.
@@ -431,6 +444,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (dlError) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `download: ${dlError.message}`);
+        if (classifyWriteError(dlError) !== null) {
+            recordCheckCompleted();
+        }
         return;
     }
 
@@ -477,6 +493,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (chmodError) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `chmod: ${chmodError.message}`);
+        if (classifyWriteError(chmodError) !== null) {
+            recordCheckCompleted();
+        }
         return;
     }
 

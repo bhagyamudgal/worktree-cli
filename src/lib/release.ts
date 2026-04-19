@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { once } from "node:events";
 import { timingSafeEqual } from "node:crypto";
 import { tryCatch, tryCatchSync } from "./try-catch";
 import pkg from "../../package.json";
@@ -44,6 +45,7 @@ const DEFAULT_META_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSET_TIMEOUT_MS = 600_000;
 // 4× headroom over current ~50 MB binary; rejects oversized CDN responses pre-verification.
 const MAX_ASSET_BYTES = 200 * 1024 * 1024;
+const MAX_REDIRECT_HOPS = 5;
 
 type ReleaseAsset = {
     name: string;
@@ -151,17 +153,48 @@ async function withTimeout<T>(
         controller.abort();
     }, timeoutMs);
     try {
-        const response = await fetch(url, {
-            signal: controller.signal,
-            headers: buildGitHubHeaders(),
-        });
-        // Re-validate post-redirect host; initial pin is bypassable via an injected `Location:` on hop 1.
-        if (response.url && !isAllowedReleaseHost(response.url)) {
-            throw new Error(
-                `Refused redirect to disallowed host: ${JSON.stringify(response.url.slice(0, 120))}`
-            );
+        // Follow redirects manually so each hop's host is validated BEFORE we connect to it —
+        // default `redirect: "follow"` connects to intermediate hosts and only exposes the final URL.
+        const originHost = new URL(url).host;
+        let currentUrl = url;
+        // Once Authorization has been stripped on any cross-origin hop, never re-add —
+        // prevents a redirect chain that bounces back to the origin host from re-attaching the token.
+        let authStripped = false;
+        for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+            const headers = buildGitHubHeaders();
+            if (authStripped || new URL(currentUrl).host !== originHost) {
+                delete headers.Authorization;
+                authStripped = true;
+            }
+            const response = await fetch(currentUrl, {
+                signal: controller.signal,
+                headers,
+                redirect: "manual",
+            });
+            if (response.status >= 300 && response.status < 400) {
+                const location = response.headers.get("location");
+                // Drain the redirect body so keep-alive sockets don't pin across hops.
+                await tryCatch(response.body?.cancel() ?? Promise.resolve());
+                if (!location) {
+                    throw new Error(
+                        `Redirect ${response.status} without Location header from ${new URL(currentUrl).host}`
+                    );
+                }
+                const next = new URL(location, currentUrl).toString();
+                if (!isAllowedReleaseHost(next)) {
+                    // Log host only, not the full URL — signed CDN URLs can carry tokens in the query string.
+                    throw new Error(
+                        `Refused redirect to disallowed host: ${new URL(next).host}`
+                    );
+                }
+                currentUrl = next;
+                continue;
+            }
+            return await handler(response);
         }
-        return await handler(response);
+        throw new Error(
+            `Exceeded ${MAX_REDIRECT_HOPS} redirects from ${new URL(url).host}`
+        );
     } finally {
         clearTimeout(timer);
     }
@@ -235,10 +268,12 @@ async function downloadAsset(
                         `Download ${asset.name} refused: empty response body`
                     );
                 }
-                // Manual reader: bail out before buffering past the cap when Content-Length is absent/forged.
+                // Stream chunks directly to disk, enforcing the cap as bytes arrive.
+                // Avoids the ~2× memory peak of buffering all chunks then copying into one final Uint8Array.
                 const reader = response.body.getReader();
-                const chunks: Uint8Array[] = [];
+                const writer = fs.createWriteStream(destPath, { flags: "w" });
                 let bytesReceived = 0;
+                let writerClosed = false;
                 try {
                     while (true) {
                         const { done, value } = await reader.read();
@@ -250,30 +285,39 @@ async function downloadAsset(
                                 `Download ${asset.name} exceeded cap: ${bytesReceived} bytes > ${MAX_ASSET_BYTES} bytes`
                             );
                         }
-                        chunks.push(value);
+                        if (!writer.write(value)) {
+                            await once(writer, "drain");
+                        }
                     }
+                    if (bytesReceived === 0) {
+                        // Explicit empty-body error; else SHA verify later reports a misleading mismatch.
+                        throw new Error(
+                            `Download ${asset.name} refused: empty response body`
+                        );
+                    }
+                    await new Promise<void>(function (resolve, reject) {
+                        writer.once("error", reject);
+                        writer.end(function () {
+                            resolve();
+                        });
+                    });
+                    writerClosed = true;
                 } finally {
                     tryCatchSync(function () {
                         reader.releaseLock();
                     });
+                    if (!writerClosed) {
+                        writer.destroy();
+                    }
                 }
-                if (bytesReceived === 0) {
-                    // Explicit empty-body error; else SHA verify later reports a misleading mismatch.
-                    throw new Error(
-                        `Download ${asset.name} refused: empty response body`
-                    );
-                }
-                const buffer = new Uint8Array(bytesReceived);
-                let offset = 0;
-                for (const chunk of chunks) {
-                    buffer.set(chunk, offset);
-                    offset += chunk.byteLength;
-                }
-                await Bun.write(destPath, buffer);
             }
         )
     );
     if (error) {
+        // Clean up our own partial write so callers don't have to do it defensively.
+        tryCatchSync(function () {
+            fs.unlinkSync(destPath);
+        });
         throw new Error(`Failed to download ${asset.name}: ${error.message}`, {
             cause: error,
         });

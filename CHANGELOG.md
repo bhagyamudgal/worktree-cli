@@ -35,12 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Asset downloads now stream the body through a manual reader that enforces `MAX_ASSET_BYTES` during buffering, not only after — a CDN omitting or falsifying `Content-Length` can no longer balloon RAM before the size check fires. Also propagates the fetch `AbortSignal` into the body read so a slowloris response can't stretch past the 600s timeout.
 - GitHub API fetches now send `User-Agent` (`worktree-cli/vX.Y.Z`), `Accept: application/vnd.github+json`, and `X-GitHub-Api-Version: 2022-11-28`. Setting `GITHUB_TOKEN` in the environment raises the rate limit from 60/hr (anonymous) to 5000/hr (authenticated).
 - `isAutoUpdateDisabled` now fails closed on broken `~/.worktreerc` — a typo'd config no longer silently re-enables auto-update against a user's explicit opt-out.
+- Release-channel fetches now follow redirects manually, validating each hop's host against the allowlist *before* connecting. A malicious `Location:` injection on the first hop can no longer reach an arbitrary host, and the `GITHUB_TOKEN` is stripped on any cross-origin hop and not re-attached even if a later hop bounces back to the origin.
+- Applying a staged update now also respects `AUTO_UPDATE=false` in `~/.worktreerc`. Previously, a user who opted out via config after a binary was already staged would still get the staged binary installed on the next launch; now the apply path fails closed on the same config read as the background scheduler.
 
 ### Fixed
 
 - macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** in the release workflow after stripping. Prior releases shipped unsigned binaries, which Apple Silicon (arm64) macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
 - Startup hash verification of a staged binary now reads in 64 KB chunks instead of buffering the full binary in memory, keeping peak RSS flat on every launch.
-- Asset-download phase now streams directly from `fetch` to disk via `Bun.write(destPath, response)` instead of round-tripping through an `ArrayBuffer`.
+- Asset-download phase now streams chunks directly to disk via `fs.createWriteStream`, enforcing the byte cap as bytes arrive. Replaces a buffered-then-copied path that held the whole response (~50 MB for current binaries, up to the 200 MB cap) in memory twice before writing.
+- `downloadAsset` now cleans up its own partial write on error so callers can treat the destination path as all-or-nothing.
+- Background updater now throttles persistent structural failures on download and `chmod` (e.g., `EACCES`/`EROFS`), matching the existing sidecar write/rename branches. A root-owned install directory no longer burns the GitHub API quota on every launch.
+- Background updater no longer spawns a blind detached child when the cache-log file descriptor can't be opened — the same unwritable-cache condition that short-circuits the throttle now also short-circuits the spawn.
+- First-ever auto-update launch no longer prints a spurious "auto-update error log unwritable" warning caused by `statSync` returning `ENOENT` on a not-yet-created log.
 - A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle — the next launch retries so users on the lagging arch get updated promptly once the asset is uploaded.
 - `worktree auto-update` failures caused by a read-only binary directory (`EACCES`/`EPERM`/`EROFS` on the atomic swap) now clean up the staged artifacts and print a one-line `run "sudo worktree update"` hint on stderr instead of looping on every launch.
 - Non-permission rename failures (`ETXTBSY`, `EXDEV`, `ENOSPC`, `EIO`, `EBUSY`) now cleanup the staged artifacts too, so a persistent rename failure can't pin a warning on every single launch.

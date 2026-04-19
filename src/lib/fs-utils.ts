@@ -68,5 +68,11 @@ function deepestMessage(error: unknown): string {
     return cur instanceof Error ? cur.message : String(cur);
 }
 
-export { classifyWriteError, deepestMessage, safeUnlink, safeUnlinkSync };
+export {
+    classifyWriteError,
+    deepestMessage,
+    isEnoent,
+    safeUnlink,
+    safeUnlinkSync,
+};
 export type { WriteErrorCode };
