@@ -6,13 +6,7 @@ import pkg from "../../package.json";
 const REPO = "bhagyamudgal/worktree-cli";
 const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
 
-// Defense in depth: even though browser_download_url comes from a trusted
-// GitHub API JSON, host-pin the fetch so a future CDN substitution or
-// release-asset compromise can't redirect downloads to an attacker-chosen
-// origin. api.github.com serves the release JSON; objects.githubusercontent
-// .com / github-releases.githubusercontent.com / release-assets.githubuser
-// content.com host the binary assets; codeload.github.com handles a
-// fallback path; github.com handles redirects.
+// Host-pin fetches to GitHub origins; defense-in-depth against CDN/release-asset compromise.
 const ALLOWED_RELEASE_HOSTS = new Set([
     "api.github.com",
     "github.com",
@@ -32,10 +26,7 @@ function isAllowedReleaseHost(urlString: string): boolean {
 
 const RELEASE_TAG_PATTERN = /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?$/;
 
-// GitHub REST API requires a User-Agent. Default Bun UA works today but is
-// fragile under future GitHub policy. Identifying as worktree-cli also
-// makes this client traceable in logs if something ever misbehaves.
-// When GITHUB_TOKEN is set, rate limit bumps from 60/hr (anon) to 5000/hr.
+// Identify as worktree-cli; GITHUB_TOKEN bumps rate limit from 60/hr to 5000/hr.
 function buildGitHubHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
         "User-Agent": `worktree-cli/${pkg.version}`,
@@ -51,9 +42,7 @@ function buildGitHubHeaders(): Record<string, string> {
 
 const DEFAULT_META_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSET_TIMEOUT_MS = 600_000;
-// Hard cap on downloaded release assets. Current binaries are ~50 MB, so
-// 200 MB leaves 4× headroom while still rejecting a malicious CDN response
-// that would fill the binary-dir filesystem before SHA verification fires.
+// 4× headroom over current ~50 MB binary; rejects oversized CDN responses pre-verification.
 const MAX_ASSET_BYTES = 200 * 1024 * 1024;
 
 type ReleaseAsset = {
@@ -166,11 +155,7 @@ async function withTimeout<T>(
             signal: controller.signal,
             headers: buildGitHubHeaders(),
         });
-        // Re-validate the post-redirect URL: GitHub release downloads always
-        // bounce through 302 → objects.githubusercontent.com, so the initial
-        // host-pin alone is bypassable by anyone who can MITM the first hop
-        // and inject `Location: https://attacker.example/`. Trust only what
-        // the redirect chain settled on.
+        // Re-validate post-redirect host; initial pin is bypassable via an injected `Location:` on hop 1.
         if (response.url && !isAllowedReleaseHost(response.url)) {
             throw new Error(
                 `Refused redirect to disallowed host: ${JSON.stringify(response.url.slice(0, 120))}`
@@ -196,10 +181,7 @@ async function fetchLatestRelease(
             if (!isReleaseInfo(json)) {
                 throw new Error("Release payload missing tag_name or assets");
             }
-            // Validate tag shape at the API boundary so a malicious or
-            // misconfigured tag (e.g., "v1.2.3/../evil") can't propagate
-            // through to printError messages, log lines, or any future
-            // path-joining caller.
+            // Reject malformed tags at the boundary so they can't propagate into paths/logs.
             if (!RELEASE_TAG_PATTERN.test(json.tag_name)) {
                 throw new Error(
                     `Release tag malformed: ${JSON.stringify(json.tag_name.slice(0, 40))}`
@@ -253,13 +235,7 @@ async function downloadAsset(
                         `Download ${asset.name} refused: empty response body`
                     );
                 }
-                // Stream the body into a growing chunk list, tracking bytes
-                // received so we can bail out BEFORE buffering past the cap
-                // when Content-Length is absent or forged. A plain
-                // `response.arrayBuffer()` would buffer the whole body
-                // before any cap check; a plain `Bun.write(destPath, response)`
-                // doesn't propagate the fetch AbortSignal reliably into the
-                // body read. Manual reader gives us both bounds.
+                // Manual reader: bail out before buffering past the cap when Content-Length is absent/forged.
                 const reader = response.body.getReader();
                 const chunks: Uint8Array[] = [];
                 let bytesReceived = 0;
@@ -282,10 +258,7 @@ async function downloadAsset(
                     });
                 }
                 if (bytesReceived === 0) {
-                    // 200 OK with empty body (CDN edge case, misconfigured
-                    // proxy). Without this guard, Bun.write writes an empty
-                    // file and SHA verification later reports a misleading
-                    // "hash mismatch" instead of the upstream cause.
+                    // Explicit empty-body error; else SHA verify later reports a misleading mismatch.
                     throw new Error(
                         `Download ${asset.name} refused: empty response body`
                     );
@@ -375,8 +348,7 @@ function verifyBinaryHashSync(
 
 function constantTimeEquals(a: string, b: string): boolean {
     if (a.length !== b.length) return false;
-    // node:crypto.timingSafeEqual is a C-level constant-time compare —
-    // strictly better than a userland XOR loop that V8/JSC may short-circuit.
+    // Constant-time compare prevents timing side-channel on hash compare.
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
@@ -385,10 +357,7 @@ type Sha256SumsResult =
     | { kind: "ok"; sums: Record<string, string> }
     | { kind: "error"; reason: string; retryable: boolean };
 
-// 5xx / network errors are retryable (transient CDN or server issues).
-// Most 4xx responses are permanent (missing asset, auth problem), but
-// 403/429 specifically signal rate-limiting (especially for anonymous
-// callers — 60/hr GitHub limit) and ARE transient.
+// 5xx and 403/429 (rate-limit) retryable; other 4xx treated as permanent.
 function isRetryableHttpStatus(status: number): boolean {
     if (status === 403 || status === 429) return true;
     return status >= 500 && status < 600;
@@ -419,14 +388,10 @@ async function fetchSha256Sums(
                     return {
                         kind: "error",
                         reason: "empty SHA256SUMS body",
-                        // Likely mid-publish or transient; next launch retries.
                         retryable: true,
                     };
                 }
-                // parseSha256Sums throws on duplicate-entry tampering — that
-                // is a permanent integrity failure for THIS release, not a
-                // transient network issue. Catch it inline so it doesn't
-                // collapse into the generic retryable network branch below.
+                // Duplicate entries are tampering, not transient — permanent failure.
                 const { data: parsed, error: parseError } = tryCatchSync(
                     function () {
                         return parseSha256Sums(text);
@@ -447,17 +412,12 @@ async function fetchSha256Sums(
         return {
             kind: "error",
             reason: error?.message ?? "network error",
-            // Network errors (DNS, abort, fetch throw) are transient.
             retryable: true,
         };
     }
     return result;
 }
 
-// Unified entry point for "download is on disk — verify it against SHA256SUMS
-// before we chmod/rename/execute". Both the foreground `update` command and
-// the background check need this exact flow; keeping it in one place means a
-// future tweak (e.g., stricter not-published handling) lands everywhere.
 type VerifyAssetResult =
     | { ok: true; hash: string | null } // hash === null when SHA256SUMS isn't published
     | { ok: false; kind: "sums-error"; reason: string; retryable: boolean }
@@ -501,8 +461,7 @@ async function verifyAssetAgainstSums(
 }
 
 function parseSha256Sums(text: string): Record<string, string> {
-    // Object.create(null) blocks __proto__/constructor/prototype key
-    // pollution from an attacker-substituted SHA256SUMS file.
+    // Null-prototype object blocks __proto__/constructor pollution from a tampered file.
     const result: Record<string, string> = Object.create(null);
     for (const line of text.split("\n")) {
         const trimmed = line.trim();

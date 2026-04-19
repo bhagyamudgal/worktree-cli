@@ -36,12 +36,7 @@ function safeUnlinkSync(filePath: string): void {
 
 type WriteErrorCode = "EACCES" | "EPERM" | "EROFS" | "EBUSY" | "ETXTBSY";
 
-// release.ts wraps errno errors as `new Error(msg, { cause })` — walk the
-// cause chain so the "binary directory not writable" branch fires even
-// when the top-level Error lacks a .code field. EBUSY (Windows: file
-// locked) and ETXTBSY (Linux: text file busy) are included because they
-// behave like permanent failures from the auto-updater's POV — retry on
-// every launch would just re-download the same blob and re-fail.
+// Walks cause chain for errno; EBUSY/ETXTBSY treated as permanent (file locked/busy).
 const WRITE_ERROR_CODES = new Set([
     "EACCES",
     "EPERM",
@@ -64,9 +59,7 @@ function classifyWriteError(error: unknown): WriteErrorCode | null {
     return null;
 }
 
-// Walk `Error.cause` to the deepest leaf so the original errno message
-// (ENOTFOUND, ECONNRESET, ETIMEDOUT) surfaces to the user instead of the
-// generic wrapper ("Failed to reach GitHub releases API").
+// Unwrap `cause` to surface the original errno message instead of a generic wrapper.
 function deepestMessage(error: unknown): string {
     let cur: unknown = error;
     while (cur instanceof Error && cur.cause !== undefined) {

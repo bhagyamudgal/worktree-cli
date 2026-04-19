@@ -47,10 +47,7 @@ describe("compareVersions", () => {
     });
 
     it("compares numeric prerelease segments as strings (rc.10 < rc.2)", () => {
-        // Intentional non-strict-SemVer: "rc.10" sorts before "rc.2" by
-        // lexicographic string compare. Strict SemVer 2.0 §11 would order
-        // numeric segments numerically (rc.2 < rc.10). If prereleases ever
-        // start shipping from this repo, revisit.
+        // Non-strict SemVer: lexicographic prerelease ordering (rc.10 < rc.2).
         expect(compareVersions("1.2.3-rc.10", "1.2.3-rc.2")).toBeLessThan(0);
     });
 
@@ -133,10 +130,7 @@ describe("parseSha256Sums", () => {
     it("rejects BSD-tagged-format `SHA256 (file) = hex` (not the format we publish)", () => {
         const text = `SHA256 (worktree-darwin-arm64) = ${"a".repeat(64)}`;
         const result = parseSha256Sums(text);
-        // Parser regex doesn't match this format — entry is silently skipped.
-        // Asserting empty result pins the parser's behavior so a future
-        // regression that loosens the regex is caught here instead of
-        // accepting unverified hashes downstream.
+        // Pins the parser to reject unknown formats — guards against accepting unverified hashes.
         expect(Object.keys(result)).toEqual([]);
     });
 });
@@ -240,8 +234,7 @@ describe("verifyAssetAgainstSums", () => {
     const ASSET_BYTES = new Uint8Array([
         0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64,
     ]);
-    // Precomputed SHA256 of "hello world" (ASSET_BYTES) — avoids runtime
-    // dependence on Bun.CryptoHasher in test setup.
+    // Precomputed SHA256 of ASSET_BYTES.
     const ASSET_SHA =
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
     const ASSET_NAME = "worktree-darwin-arm64";
@@ -263,13 +256,12 @@ describe("verifyAssetAgainstSums", () => {
         try {
             fs.unlinkSync(tmpFile);
         } catch {
-            // best-effort cleanup
+            // ignore
         }
     });
 
     function makeAsset(name: string): ReleaseAsset {
-        // Use an allowlisted host so the host-pin guard inside withTimeout
-        // doesn't reject the request before stubFetch can intercept it.
+        // Allowlisted host so the withTimeout host-pin doesn't reject pre-stub.
         return {
             name,
             browser_download_url: `https://objects.githubusercontent.com/${name}`,

@@ -84,8 +84,7 @@ export const updateCommand = command({
         printInfo(`Downloading ${assetName}...`);
 
         const tmpPath = `${binaryPath}.update-tmp`;
-        // Clear any pre-existing entry so the write can't follow a planted
-        // symlink in a shared install dir.
+        // Pre-unlink to prevent symlink-follow in shared install dirs.
         await safeUnlink(tmpPath);
         const { error: dlError } = await tryCatch(
             downloadAsset(asset, tmpPath)
@@ -162,9 +161,7 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        // Foreground update succeeded — invalidate any pending background
-        // stage so the next launch doesn't silently downgrade us by applying
-        // an older staged version. Bump the throttle for the same reason.
+        // Invalidate pending stage + bump throttle to prevent silent downgrade on next launch.
         cleanupStagedArtifacts();
         recordCheckCompleted();
 

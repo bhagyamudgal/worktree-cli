@@ -102,10 +102,7 @@ async function readConfigFile(
             `${filePath}:AUTO_UPDATE`,
             `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead.`
         );
-        // Strip the ignored key BEFORE validation; otherwise an invalid value
-        // (e.g. AUTO_UPDATE=junk) throws inside booleanLike and the catch
-        // below falls back to all defaults, silently discarding any valid
-        // DEFAULT_BASE / WORKTREE_DIR from the same file.
+        // Strip pre-validate so `AUTO_UPDATE=junk` doesn't discard valid sibling keys.
         delete raw.AUTO_UPDATE;
     }
     const { data: parsed, error: parseError } = tryCatchSync(function () {
@@ -125,23 +122,14 @@ async function loadConfig(root: string): Promise<Config> {
     return readConfigFile(path.join(root, ".worktreerc"), "project");
 }
 
-// Auto-update reads config on every background check and must fail CLOSED
-// on parse/read errors. The generic readConfigFile falls back to defaults
-// (AUTO_UPDATE: true), which would silently override a user's explicit
-// opt-out whenever their config has a typo. This helper returns the
-// narrow signal "should auto-update fire?" with fail-closed semantics.
-//
-// `onError` lets the caller (auto-update.ts) record diagnostics to the
-// last-error log so a user with a typo doesn't have auto-update silently
-// disabled forever. Optional to avoid forcing an import on call sites that
-// don't need diagnostics.
+// Fail CLOSED on parse/read errors so a typo can't silently override opt-out.
+// `onError` threads diagnostics so users discover *why* auto-update is disabled.
 async function shouldAutoUpdate(
     onError?: (message: string) => void
 ): Promise<boolean> {
     const filePath = path.join(os.homedir(), ".worktreerc");
     const file = Bun.file(filePath);
-    // file.exists() can throw on EACCES (e.g., parent dir unreadable). Guard
-    // it instead of letting it bubble up and crash the scheduler.
+    // `file.exists()` can throw EACCES; guard to avoid crashing the scheduler.
     const { data: isExists, error: existsError } = await tryCatch(
         file.exists()
     );

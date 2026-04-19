@@ -10,11 +10,7 @@ export const internalUpdateCheckCommand = command({
     desc: "",
     hidden: true,
     handler: async () => {
-        // Silent detached child has no error surface by design
-        // (stdio/stderr redirected in scheduleBackgroundUpdateCheck). Wrap
-        // the whole run so any unhandled throw from runBackgroundUpdateCheck
-        // appends a full stack trace to last-error before exiting non-zero.
-        // Without this, a programmer bug here is invisible in production.
+        // Detached child's stderr is redirected; catch so panics still hit last-error.
         try {
             await runBackgroundUpdateCheck();
         } catch (error) {
