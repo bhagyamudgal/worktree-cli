@@ -153,8 +153,6 @@ function cleanupStagedArtifacts(): void {
     safeUnlinkSync(getMetaSidecarPath());
 }
 
-// true=exists, false=ENOENT, null=non-ENOENT error logged; caller must bail without
-// destructive cleanup (don't unlink anything we can't stat reliably).
 function checkExists(
     filePath: string,
     kind: "apply" | "check"
@@ -174,8 +172,7 @@ function isWithinGracePeriod(filePath: string): boolean {
     });
     if (error) {
         if (isEnoent(error)) return false;
-        // Non-ENOENT (EACCES/EIO) — surface the diagnostic and be conservative:
-        // assume in-grace so we never destroy a peer's stage on incomplete info.
+        // Non-ENOENT: be conservative (return true) — never destroy a peer's stage on incomplete stat info.
         appendLastError("apply", `grace-stat: ${error.message}`);
         return true;
     }
@@ -439,8 +436,6 @@ async function runBackgroundUpdateCheck(): Promise<void> {
             "check",
             `fetchLatestRelease: ${releaseError?.message ?? "unknown"}`
         );
-        // Bump throttle on transient network failures so we don't burn the GitHub
-        // API quota retrying on every CLI invocation while api.github.com is down.
         recordCheckCompleted();
         return;
     }
@@ -478,8 +473,6 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (dlError) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `download: ${dlError.message}`);
-        // Bump throttle on every download failure (write OR network) so a persistent
-        // outage doesn't trigger a re-download cycle on every CLI invocation.
         recordCheckCompleted();
         return;
     }
@@ -493,8 +486,6 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (!verify.ok) {
         safeUnlinkSync(tmpPath);
         if (verify.kind === "sums-tamper") {
-            // Loud TAMPER: prefix in the log so a curious user grepping last-error
-            // can distinguish supply-chain integrity hits from generic outages.
             appendLastError(
                 "check",
                 `TAMPER: SHA256SUMS for ${assetName} is malformed (${verify.reason}) — refusing to stage`
@@ -545,9 +536,7 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (!probe.ok) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `probe: ${probe.reason}`);
-        // Treat probe failure as structural for THIS release — bumping throttle
-        // prevents a re-download/re-probe loop burning ~50MB on every CLI invocation
-        // until upstream republishes a fixed binary.
+        // Probe fail is structural for this release — burn throttle or we redownload 50 MB every launch.
         recordCheckCompleted();
         return;
     }

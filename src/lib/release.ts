@@ -103,10 +103,7 @@ function parseVersion(v: string): ParsedVersion {
     };
 }
 
-// SemVer 2.0 §11: dot-separated identifiers compared pairwise.
-// Numeric identifiers compare numerically; string identifiers compare lexically;
-// numeric identifiers always have lower precedence than strings; longer field
-// wins iff all preceding identifiers are equal.
+// SemVer 2.0 §11: pairwise compare; numeric<numeric numerically; numeric<string; longer wins on tie.
 function comparePrereleaseIdentifier(a: string, b: string): number {
     const aNumeric = /^\d+$/.test(a);
     const bNumeric = /^\d+$/.test(b);
@@ -204,9 +201,6 @@ async function withTimeout<T>(
             if (response.status >= 300 && response.status < 400) {
                 const location = response.headers.get("location");
                 // Drain the redirect body so keep-alive sockets don't pin across hops.
-                // Body-cancel failures here are non-fatal; controller.abort() in the
-                // outer timer will close the socket anyway. Caller-supplied onError
-                // (when available — only downloadAsset threads one) gets the diagnostic.
                 await tryCatch(response.body?.cancel() ?? Promise.resolve());
                 if (!location) {
                     throw new Error(
@@ -447,9 +441,7 @@ type Sha256SumsResult =
     | { kind: "not-published" }
     | { kind: "ok"; sums: Record<string, string> }
     | { kind: "error"; reason: string; retryable: boolean }
-    // "tamper" = SHA256SUMS body parsed but contains evidence of tampering
-    // (today: duplicate entries). Distinct from generic "error" so callers can
-    // escalate (foreground: loud red error; background: TAMPER: log prefix).
+    // "tamper" = parsed-but-malformed sums (today: duplicates) — distinct from transient "error".
     | { kind: "tamper"; reason: string };
 
 // 5xx and 403/429 (rate-limit) retryable; other 4xx treated as permanent.
@@ -493,10 +485,6 @@ async function fetchSha256Sums(
                     }
                 );
                 if (parseError) {
-                    // parseSha256Sums throws ONLY on duplicate entries today —
-                    // which is the canonical signature of supply-chain tampering,
-                    // not a transient outage. Discriminate so foreground/background
-                    // can escalate appropriately.
                     return {
                         kind: "tamper",
                         reason: parseError.message,

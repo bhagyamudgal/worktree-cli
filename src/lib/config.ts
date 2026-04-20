@@ -92,9 +92,19 @@ async function readConfigFile(
     scope: ConfigScope
 ): Promise<Config> {
     const file = Bun.file(filePath);
-    const isExists = await file.exists();
-    if (!isExists) return validateConfig({});
     const display = displayPath(filePath);
+    // file.exists() can throw on stat errors — guard like shouldAutoUpdate below.
+    const { data: isExists, error: existsError } = await tryCatch(
+        file.exists()
+    );
+    if (existsError) {
+        warnOnce(
+            filePath,
+            `warning: could not stat ${display}: ${existsError.message}. Using defaults.`
+        );
+        return validateConfig({});
+    }
+    if (!isExists) return validateConfig({});
     const { data: content, error: readError } = await tryCatch(file.text());
     if (readError) {
         warnOnce(
@@ -105,8 +115,7 @@ async function readConfigFile(
     }
     const raw = parseConfigContent(content);
     if (scope === "project" && "AUTO_UPDATE" in raw) {
-        // Validate the value too so a user moving the line to ~/.worktreerc later
-        // already knows whether they wrote a valid boolean-like or garbage.
+        // Also validate — user moving this line to ~/.worktreerc later needs to know if it's syntactically valid.
         const { data: probe, error: probeError } = tryCatchSync(function () {
             return booleanLike.safeParse(raw.AUTO_UPDATE);
         });

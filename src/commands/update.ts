@@ -150,9 +150,7 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        // Probe BEFORE rename: a SHA-valid binary that won't run on this machine
-        // (libc/codesign/macOS-version mismatch) would otherwise replace the user's
-        // working binary with one that segfaults on next launch.
+        // Probe before rename — SHA match ≠ runnable; segfaults on libc/codesign mismatch.
         const probe = probeBinaryRuns(tmpPath);
         if (!probe.ok) {
             await safeUnlink(tmpPath);
