@@ -5,28 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- Auto-update now bumps its 24-hour throttle when a release is genuinely unusable on the current platform (probe failure), when GitHub is unreachable, or when a download fails for any reason. Previously, every CLI invocation re-downloaded ~50 MB and re-hit the GitHub API, which could trip the 60-requests-per-hour anonymous rate limit on a heavy day.
-- Foreground `worktree update` now smoke-tests the downloaded binary (`--version`) before atomically replacing the installed binary. A SHA256-valid release that won't run on the current machine (libc/codesign/macOS-version mismatch) is now refused with a clear error instead of leaving the user with a broken `worktree`.
-- A `SHA256SUMS` file containing **duplicate entries** — the canonical signature of supply-chain tampering — now triggers a loud red `SECURITY ALERT` in `worktree update` and a `TAMPER:` prefix in the background error log, instead of being reported as a generic "could not be fetched" outage.
-- Project-scope `AUTO_UPDATE=...` is still ignored (matches existing behaviour) but the warning now also reports whether the value is a *valid* boolean-like, so a user moving the line to `~/.worktreerc` later already knows whether it would have taken effect.
-- Version comparison now follows SemVer 2.0 §11 for prerelease ordering: `1.2.3-rc.10` is now correctly **greater than** `1.2.3-rc.2`. Previously the comparator used lexicographic string ordering, which would have stranded users on `rc.2` from ever auto-updating to `rc.10`.
-
-### Security
-
-- Auto-update tmp paths now use `crypto.randomBytes(8)` instead of `process.pid`, removing a predictable-filename primitive that a co-tenant on a group-writable install dir could pre-plant a symlink at. Pre-unlink remains as the primary defense.
-- Stage detection no longer silently fails on `EACCES` of the binary directory: `existsSync` was masking permission errors as "no stage". Now logs the diagnostic and bails without destructive cleanup, so a transient permission glitch can't destroy a peer process's mid-commit stage either.
-
-### Fixed
-
-- `release.ts` download path no longer silently swallows three classes of error (writer post-finish flush errors, reader `releaseLock` failures, partial-write cleanup failures). Errors now route through an `onError` callback that the auto-updater logs to `~/.cache/worktree-cli/last-error`.
-- Removed an off-by-one in the redirect loop (`<=` instead of `<`) — the loop was allowing 6 hops while the error message claimed a limit of 5.
-- Aggregated SHA256SUMS in the release workflow now compares against the actual binary count instead of a hardcoded `expected=4` — adding or removing a build target no longer requires editing two places.
-
-## [1.3.0] - 2026-04-17
+## [1.3.0] - 2026-04-20
 
 ### Added
 
@@ -35,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Auto-update now bumps its 24-hour throttle when a release is genuinely unusable on the current platform (probe failure), when GitHub is unreachable, or when a download fails for any reason. Previously, every CLI invocation re-downloaded ~50 MB and re-hit the GitHub API, which could trip the 60-requests-per-hour anonymous rate limit on a heavy day.
+- Foreground `worktree update` now smoke-tests the downloaded binary (`--version`) before atomically replacing the installed binary. A SHA256-valid release that won't run on the current machine (libc/codesign/macOS-version mismatch) is now refused with a clear error instead of leaving the user with a broken `worktree`.
+- A `SHA256SUMS` file containing **duplicate entries** — the canonical signature of supply-chain tampering — now triggers a loud red `SECURITY ALERT` in `worktree update` and a `TAMPER:` prefix in the background error log, instead of being reported as a generic "could not be fetched" outage.
+- Project-scope `AUTO_UPDATE=...` is still ignored (matches existing behaviour) but the warning now also reports whether the value is a *valid* boolean-like, so a user moving the line to `~/.worktreerc` later already knows whether it would have taken effect.
+- Version comparison now follows SemVer 2.0 §11 for prerelease ordering: `1.2.3-rc.10` is now correctly **greater than** `1.2.3-rc.2`. Previously the comparator used lexicographic string ordering, which would have stranded users on `rc.2` from ever auto-updating to `rc.10`.
 - Release binaries are slightly smaller (minified, debug symbols stripped). No behavioural change.
 - Release workflow smoke-tests each built binary (`--version`) before publishing so a broken build can't reach users.
 - `AUTO_UPDATE` in a project `.worktreerc` now warns once that it is ignored — only `~/.worktreerc` is honoured (matches the README).
@@ -43,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Auto-update tmp paths now use `crypto.randomBytes(8)` instead of `process.pid`, removing a predictable-filename primitive that a co-tenant on a group-writable install dir could pre-plant a symlink at. Pre-unlink remains as the primary defense.
+- Stage detection no longer silently fails on `EACCES` of the binary directory: `existsSync` was masking permission errors as "no stage". Now logs the diagnostic and bails without destructive cleanup, so a transient permission glitch can't destroy a peer process's mid-commit stage either.
 - Release downloads are verified against `SHA256SUMS` using a constant-time hash comparison before being made executable.
 - Release-channel fetches are restricted to an allowlist of GitHub-owned hosts, validated on every redirect hop **before** the runtime connects. A malicious `Location:` injection on the first hop can no longer reach an arbitrary host. `GITHUB_TOKEN` is stripped on any cross-origin hop and not re-attached if the chain bounces back to the origin.
 - Release assets with a declared `Content-Length` over 200 MB are rejected outright, and byte-counts are enforced as the body streams in — a CDN omitting or forging `Content-Length` cannot exhaust memory before the size check fires. The download timeout is honoured throughout the body read so a slowloris response can't stretch past it.
@@ -57,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `release.ts` download path no longer silently swallows three classes of error (writer post-finish flush errors, reader `releaseLock` failures, partial-write cleanup failures). Errors now route through an `onError` callback that the auto-updater logs to `~/.cache/worktree-cli/last-error`.
+- Removed an off-by-one in the redirect loop (`<=` instead of `<`) — the loop was allowing 6 hops while the error message claimed a limit of 5.
+- Aggregated SHA256SUMS in the release workflow now compares against the actual binary count instead of a hardcoded `expected=4` — adding or removing a build target no longer requires editing two places.
 - macOS releases (darwin-arm64, darwin-x64) are now **ad-hoc codesigned** after stripping. Prior releases shipped unsigned binaries, which Apple Silicon macOS SIGKILLs on execution. Users who hit `killed: 9` errors after downloading the raw binary should re-install from v1.3.0 onward.
 - Auto-update no longer buffers the full binary in memory during download or verification — peak memory stays flat regardless of binary size.
 - A missing per-arch asset in the latest release no longer burns the 24h auto-update throttle; the next launch retries so users on the lagging arch get updated once the asset is uploaded.
@@ -75,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added coverage for the SHA256 verification flow across all result shapes (legacy, normal, transient, permanent, missing-entry, hash-mismatch, hash-io-error) using stubbed `fetch` and a precomputed-hash asset file — pins the safety contract against future refactors.
 - Added coverage for the `SHA256SUMS` parser's duplicate-entry rejection.
+- Added coverage for SemVer 2.0 §11 prerelease ordering (numeric, string, numeric-vs-string, longer-wins-on-tie).
 
 ## [1.2.0] - 2026-04-17
 
