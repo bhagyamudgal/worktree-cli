@@ -1,55 +1,140 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+    push:
+        tags: ["v*"]
 
 permissions:
-  contents: write
+    contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: darwin-arm64
-            os: macos-latest
-            bun_target: bun-darwin-arm64
-          - target: darwin-x64
-            os: macos-15-intel
-            bun_target: bun-darwin-x64
-          - target: linux-x64
-            os: ubuntu-latest
-            bun_target: bun-linux-x64
-          - target: linux-arm64
-            os: ubuntu-latest
-            bun_target: bun-linux-arm64
+    build:
+        name: Build ${{ matrix.target }}
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                include:
+                    - target: darwin-arm64
+                      os: macos-latest
+                      bun_target: bun-darwin-arm64
+                    - target: darwin-x64
+                      os: macos-15-intel
+                      bun_target: bun-darwin-x64
+                    - target: linux-x64
+                      os: ubuntu-latest
+                      bun_target: bun-linux-x64
+                    - target: linux-arm64
+                      os: ubuntu-24.04-arm
+                      bun_target: bun-linux-arm64
 
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun build src/index.ts --compile --target=${{ matrix.bun_target }} --outfile dist/worktree-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: worktree-${{ matrix.target }}
-          path: dist/worktree-${{ matrix.target }}
+        steps:
+            - uses: actions/checkout@v6
+            - uses: oven-sh/setup-bun@v2
+            - run: bun install --frozen-lockfile
 
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
+            - name: Compile binary
+              run: |
+                  bun build src/index.ts \
+                    --compile \
+                    --minify \
+                    --sourcemap=none \
+                    --target=${{ matrix.bun_target }} \
+                    --outfile dist/worktree-${{ matrix.target }}
 
-      - run: chmod +x artifacts/worktree-*
+            - name: Install llvm-strip (Linux)
+              if: startsWith(matrix.target, 'linux-')
+              run: sudo apt-get update && sudo apt-get install -y llvm
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: artifacts/worktree-*
+            - name: Strip symbols (Linux)
+              if: startsWith(matrix.target, 'linux-')
+              run: llvm-strip --strip-unneeded dist/worktree-${{ matrix.target }}
+
+            - name: Strip symbols (macOS)
+              if: startsWith(matrix.target, 'darwin-')
+              run: strip dist/worktree-${{ matrix.target }}
+
+            - name: Ad-hoc codesign (macOS)
+              if: startsWith(matrix.target, 'darwin-')
+              run: |
+                  xattr -cr dist/worktree-${{ matrix.target }}
+                  codesign --force --sign - dist/worktree-${{ matrix.target }}
+                  codesign -dv dist/worktree-${{ matrix.target }}
+
+            - name: Verify binary architecture and size
+              run: |
+                  file dist/worktree-${{ matrix.target }}
+                  ls -lh dist/worktree-${{ matrix.target }}
+
+            - name: Smoke-test --version
+              env:
+                  WORKTREE_NO_UPDATE: "1"
+              run: |
+                  chmod +x dist/worktree-${{ matrix.target }}
+                  ./dist/worktree-${{ matrix.target }} --version
+
+            - name: Compute SHA256
+              run: |
+                  cd dist
+                  shasum -a 256 worktree-${{ matrix.target }} > worktree-${{ matrix.target }}.sha256
+
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: worktree-${{ matrix.target }}
+                  path: |
+                      dist/worktree-${{ matrix.target }}
+                      dist/worktree-${{ matrix.target }}.sha256
+
+    release:
+        name: Create Release
+        needs: build
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  path: artifacts
+                  merge-multiple: true
+
+            - name: Aggregate SHA256SUMS
+              run: |
+                  cd artifacts
+                  # Fail-fast: if no .sha256 sidecars were downloaded (e.g.,
+                  # an upload-artifact rename regression), the cat below
+                  # would silently produce an empty SHA256SUMS that bricks
+                  # every client's auto-update install.
+                  count=$(ls -1 worktree-*.sha256 2>/dev/null | wc -l | tr -d ' ')
+                  binaries=$(ls -1 worktree-* 2>/dev/null | grep -v '\.sha256$' | wc -l | tr -d ' ')
+                  if [ "$count" -lt 1 ] || [ "$count" != "$binaries" ]; then
+                      echo "sha256 count ($count) does not match binary count ($binaries) — abort" >&2
+                      exit 1
+                  fi
+                  cat worktree-*.sha256 > SHA256SUMS
+                  rm worktree-*.sha256
+                  if [ ! -s SHA256SUMS ]; then
+                      echo "SHA256SUMS empty after aggregation — abort" >&2
+                      exit 1
+                  fi
+                  cat SHA256SUMS
+
+            - run: chmod +x artifacts/worktree-*
+
+            # Create the release as a draft and upload all assets to it.
+            # Publishing happens in the next step so `releases/latest` never
+            # returns a release where binaries are attached but SHA256SUMS
+            # is still being uploaded — that window would let clients fall
+            # through to the TLS-only "not-published" path and install
+            # unverified.
+            - uses: softprops/action-gh-release@v2
+              with:
+                  draft: true
+                  generate_release_notes: true
+                  files: |
+                      artifacts/worktree-*
+                      artifacts/SHA256SUMS
+
+            - name: Publish release (flip draft to public)
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REF_NAME: ${{ github.ref_name }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  gh release edit "$REF_NAME" --repo "$REPO" --draft=false

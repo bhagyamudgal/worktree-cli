@@ -62,12 +62,15 @@ On `remove`, it:
 
 ## Config
 
-The `.worktreerc` file supports:
+`.worktreerc` keys are read from one of two locations depending on the key:
 
-| Key | Description | Example |
-|-----|-------------|---------|
-| `DEFAULT_BASE` | Default base branch for new worktrees | `origin/dev` |
-| `WORKTREE_DIR` | Directory name for worktrees (default: `.worktrees`) | `.worktrees` |
+| Key | Description | Where | Example |
+|-----|-------------|-------|---------|
+| `DEFAULT_BASE` | Default base branch for new worktrees | Project (`<repo>/.worktreerc`) | `origin/dev` |
+| `WORKTREE_DIR` | Directory name for worktrees (default: `.worktrees`) | Project (`<repo>/.worktreerc`) | `.worktrees` |
+| `AUTO_UPDATE` | Enable background auto-update checks (default: `true`) | User (`~/.worktreerc`) only | `false` |
+
+`DEFAULT_BASE` and `WORKTREE_DIR` placed in `~/.worktreerc` are ignored — `worktree` reads them from the project file at the repo root only. `AUTO_UPDATE` placed in a project `.worktreerc` is ignored with a warning — it must live in `~/.worktreerc` so it applies across all repos under your control.
 
 ## Alias
 
@@ -81,7 +84,29 @@ Then use `gw create feature-auth`, `gw list`, etc.
 
 ## Update
 
-Re-run the install command to get the latest version.
+### Automatic
+
+Once installed, `worktree` checks GitHub for a newer release at most once every 24 hours, in the background. When a newer version is found, it is downloaded, verified against a SHA256 hash, and staged. The **next** time you invoke `worktree`, the binary is swapped atomically and the command runs against the new version — you'll see a one-line note on stderr.
+
+To disable, create `~/.worktreerc` with:
+
+```ini
+AUTO_UPDATE=false
+```
+
+Or set `WORKTREE_NO_UPDATE=1` in your environment (useful in CI).
+
+Auto-update is a no-op when running via `bun run dev` or in any non-standalone invocation.
+
+Background check failures (network errors, hash mismatches, filesystem issues) are logged to `~/.cache/worktree-cli/last-error` — check this file if auto-updates seem stuck.
+
+### Manual
+
+```bash
+worktree update
+```
+
+Forces an immediate check + download + replace, bypassing the 24-hour throttle. Requires write permission to the binary location (use `sudo` if installed under `/usr/local/bin`).
 
 ## Platforms
 

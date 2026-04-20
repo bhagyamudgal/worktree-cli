@@ -92,4 +92,26 @@ describe("validateConfig", () => {
         const config = validateConfig({ DEFAULT_BASE: "origin/dev" });
         expect(config.WORKTREE_DIR).toBe(DEFAULT_WORKTREE_DIR);
     });
+
+    it("AUTO_UPDATE defaults to true", () => {
+        const config = validateConfig({});
+        expect(config.AUTO_UPDATE).toBe(true);
+    });
+
+    it("accepts AUTO_UPDATE=false", () => {
+        const config = validateConfig({ AUTO_UPDATE: "false" });
+        expect(config.AUTO_UPDATE).toBe(false);
+    });
+
+    it("accepts AUTO_UPDATE=0, yes, 1 variants", () => {
+        expect(validateConfig({ AUTO_UPDATE: "0" }).AUTO_UPDATE).toBe(false);
+        expect(validateConfig({ AUTO_UPDATE: "no" }).AUTO_UPDATE).toBe(false);
+        expect(validateConfig({ AUTO_UPDATE: "true" }).AUTO_UPDATE).toBe(true);
+        expect(validateConfig({ AUTO_UPDATE: "1" }).AUTO_UPDATE).toBe(true);
+        expect(validateConfig({ AUTO_UPDATE: "yes" }).AUTO_UPDATE).toBe(true);
+    });
+
+    it("rejects unparseable AUTO_UPDATE", () => {
+        expect(() => validateConfig({ AUTO_UPDATE: "junk" })).toThrow();
+    });
 });
