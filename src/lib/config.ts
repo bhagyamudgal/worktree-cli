@@ -1,7 +1,7 @@
-import { z } from "zod";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { z } from "zod";
 import { DEFAULT_WORKTREE_DIR } from "./constants";
 import { tryCatch, tryCatchSync } from "./try-catch";
 
@@ -107,10 +107,15 @@ async function readConfigFile(
     if (scope === "project" && "AUTO_UPDATE" in raw) {
         // Validate the value too so a user moving the line to ~/.worktreerc later
         // already knows whether they wrote a valid boolean-like or garbage.
-        const probe = booleanLike.safeParse(raw.AUTO_UPDATE);
-        const validityNote = probe.success
-            ? `; the value "${raw.AUTO_UPDATE}" parses as a boolean (would take effect once moved)`
-            : `; the value "${raw.AUTO_UPDATE}" is also invalid as a boolean (${probe.error.issues[0]?.message ?? "unknown"})`;
+        const { data: probe, error: probeError } = tryCatchSync(function () {
+            return booleanLike.safeParse(raw.AUTO_UPDATE);
+        });
+        const validityNote =
+            probeError !== null
+                ? `; the value "${raw.AUTO_UPDATE}" is also invalid as a boolean (${probeError.message})`
+                : probe.success
+                  ? `; the value "${raw.AUTO_UPDATE}" parses as a boolean (would take effect once moved)`
+                  : `; the value "${raw.AUTO_UPDATE}" is also invalid as a boolean (${probe.error.issues[0]?.message ?? "unknown"})`;
         warnOnce(
             `${filePath}:AUTO_UPDATE`,
             `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead${validityNote}.`
