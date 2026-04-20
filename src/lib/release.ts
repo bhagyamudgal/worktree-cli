@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { once } from "node:events";
 import { timingSafeEqual } from "node:crypto";
+import { isEnoent } from "./fs-utils";
 import { tryCatch, tryCatchSync } from "./try-catch";
 import pkg from "../../package.json";
 
@@ -102,12 +103,41 @@ function parseVersion(v: string): ParsedVersion {
     };
 }
 
-function comparePrerelease(a: string | null, b: string | null): number {
-    if (a === b) return 0;
-    if (a === null) return 1;
-    if (b === null) return -1;
+// SemVer 2.0 §11: dot-separated identifiers compared pairwise.
+// Numeric identifiers compare numerically; string identifiers compare lexically;
+// numeric identifiers always have lower precedence than strings; longer field
+// wins iff all preceding identifiers are equal.
+function comparePrereleaseIdentifier(a: string, b: string): number {
+    const aNumeric = /^\d+$/.test(a);
+    const bNumeric = /^\d+$/.test(b);
+    if (aNumeric && bNumeric) {
+        const an = Number(a);
+        const bn = Number(b);
+        if (an < bn) return -1;
+        if (an > bn) return 1;
+        return 0;
+    }
+    if (aNumeric) return -1;
+    if (bNumeric) return 1;
     if (a < b) return -1;
     if (a > b) return 1;
+    return 0;
+}
+
+function comparePrerelease(a: string | null, b: string | null): number {
+    if (a === b) return 0;
+    // A version with a prerelease has lower precedence than one without.
+    if (a === null) return 1;
+    if (b === null) return -1;
+    const aParts = a.split(".");
+    const bParts = b.split(".");
+    const len = Math.min(aParts.length, bParts.length);
+    for (let i = 0; i < len; i++) {
+        const cmp = comparePrereleaseIdentifier(aParts[i], bParts[i]);
+        if (cmp !== 0) return cmp;
+    }
+    if (aParts.length < bParts.length) return -1;
+    if (aParts.length > bParts.length) return 1;
     return 0;
 }
 
@@ -160,7 +190,7 @@ async function withTimeout<T>(
         // Once Authorization has been stripped on any cross-origin hop, never re-add —
         // prevents a redirect chain that bounces back to the origin host from re-attaching the token.
         let authStripped = false;
-        for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+        for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
             const headers = buildGitHubHeaders();
             if (authStripped || new URL(currentUrl).host !== originHost) {
                 delete headers.Authorization;
@@ -174,6 +204,9 @@ async function withTimeout<T>(
             if (response.status >= 300 && response.status < 400) {
                 const location = response.headers.get("location");
                 // Drain the redirect body so keep-alive sockets don't pin across hops.
+                // Body-cancel failures here are non-fatal; controller.abort() in the
+                // outer timer will close the socket anyway. Caller-supplied onError
+                // (when available — only downloadAsset threads one) gets the diagnostic.
                 await tryCatch(response.body?.cancel() ?? Promise.resolve());
                 if (!location) {
                     throw new Error(
@@ -236,10 +269,16 @@ async function fetchLatestRelease(
     return result;
 }
 
+type DownloadOnError = (
+    op: "body-cancel" | "release-lock" | "cleanup-unlink",
+    error: Error
+) => void;
+
 async function downloadAsset(
     asset: ReleaseAsset,
     destPath: string,
-    timeoutMs: number = DEFAULT_ASSET_TIMEOUT_MS
+    timeoutMs: number = DEFAULT_ASSET_TIMEOUT_MS,
+    onError?: DownloadOnError
 ): Promise<void> {
     const { error } = await tryCatch(
         withTimeout(
@@ -296,16 +335,21 @@ async function downloadAsset(
                         );
                     }
                     await new Promise<void>(function (resolve, reject) {
-                        writer.once("error", reject);
-                        writer.end(function () {
-                            resolve();
+                        writer.end(function (
+                            err: NodeJS.ErrnoException | null | undefined
+                        ) {
+                            if (err) reject(err);
+                            else resolve();
                         });
                     });
                     writerClosed = true;
                 } finally {
-                    tryCatchSync(function () {
+                    const { error: releaseError } = tryCatchSync(function () {
                         reader.releaseLock();
                     });
+                    if (releaseError) {
+                        onError?.("release-lock", releaseError);
+                    }
                     if (!writerClosed) {
                         writer.destroy();
                     }
@@ -315,9 +359,12 @@ async function downloadAsset(
     );
     if (error) {
         // Clean up our own partial write so callers don't have to do it defensively.
-        tryCatchSync(function () {
+        const { error: cleanupError } = tryCatchSync(function () {
             fs.unlinkSync(destPath);
         });
+        if (cleanupError && !isEnoent(cleanupError)) {
+            onError?.("cleanup-unlink", cleanupError);
+        }
         throw new Error(`Failed to download ${asset.name}: ${error.message}`, {
             cause: error,
         });
@@ -399,7 +446,11 @@ function constantTimeEquals(a: string, b: string): boolean {
 type Sha256SumsResult =
     | { kind: "not-published" }
     | { kind: "ok"; sums: Record<string, string> }
-    | { kind: "error"; reason: string; retryable: boolean };
+    | { kind: "error"; reason: string; retryable: boolean }
+    // "tamper" = SHA256SUMS body parsed but contains evidence of tampering
+    // (today: duplicate entries). Distinct from generic "error" so callers can
+    // escalate (foreground: loud red error; background: TAMPER: log prefix).
+    | { kind: "tamper"; reason: string };
 
 // 5xx and 403/429 (rate-limit) retryable; other 4xx treated as permanent.
 function isRetryableHttpStatus(status: number): boolean {
@@ -442,10 +493,13 @@ async function fetchSha256Sums(
                     }
                 );
                 if (parseError) {
+                    // parseSha256Sums throws ONLY on duplicate entries today —
+                    // which is the canonical signature of supply-chain tampering,
+                    // not a transient outage. Discriminate so foreground/background
+                    // can escalate appropriately.
                     return {
-                        kind: "error",
-                        reason: `SHA256SUMS parse: ${parseError.message}`,
-                        retryable: false,
+                        kind: "tamper",
+                        reason: parseError.message,
                     };
                 }
                 return { kind: "ok", sums: parsed };
@@ -465,6 +519,7 @@ async function fetchSha256Sums(
 type VerifyAssetResult =
     | { ok: true; hash: string | null } // hash === null when SHA256SUMS isn't published
     | { ok: false; kind: "sums-error"; reason: string; retryable: boolean }
+    | { ok: false; kind: "sums-tamper"; reason: string }
     | { ok: false; kind: "missing-entry" }
     | { ok: false; kind: "hash-io-error"; cause: Error }
     | { ok: false; kind: "hash-mismatch" };
@@ -475,6 +530,9 @@ async function verifyAssetAgainstSums(
     assets: ReleaseAsset[]
 ): Promise<VerifyAssetResult> {
     const sums = await fetchSha256Sums(assets);
+    if (sums.kind === "tamper") {
+        return { ok: false, kind: "sums-tamper", reason: sums.reason };
+    }
     if (sums.kind === "error") {
         return {
             ok: false,
@@ -501,7 +559,7 @@ async function verifyAssetAgainstSums(
         }
         return { ok: false, kind: "hash-mismatch" };
     }
-    return { ok: true, hash: expected.toLowerCase() };
+    return { ok: true, hash: expected };
 }
 
 function parseSha256Sums(text: string): Record<string, string> {

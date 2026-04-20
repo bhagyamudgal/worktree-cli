@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Auto-update now bumps its 24-hour throttle when a release is genuinely unusable on the current platform (probe failure), when GitHub is unreachable, or when a download fails for any reason. Previously, every CLI invocation re-downloaded ~50 MB and re-hit the GitHub API, which could trip the 60-requests-per-hour anonymous rate limit on a heavy day.
+- Foreground `worktree update` now smoke-tests the downloaded binary (`--version`) before atomically replacing the installed binary. A SHA256-valid release that won't run on the current machine (libc/codesign/macOS-version mismatch) is now refused with a clear error instead of leaving the user with a broken `worktree`.
+- A `SHA256SUMS` file containing **duplicate entries** — the canonical signature of supply-chain tampering — now triggers a loud red `SECURITY ALERT` in `worktree update` and a `TAMPER:` prefix in the background error log, instead of being reported as a generic "could not be fetched" outage.
+- Project-scope `AUTO_UPDATE=...` is still ignored (matches existing behaviour) but the warning now also reports whether the value is a *valid* boolean-like, so a user moving the line to `~/.worktreerc` later already knows whether it would have taken effect.
+- Version comparison now follows SemVer 2.0 §11 for prerelease ordering: `1.2.3-rc.10` is now correctly **greater than** `1.2.3-rc.2`. Previously the comparator used lexicographic string ordering, which would have stranded users on `rc.2` from ever auto-updating to `rc.10`.
+
+### Security
+
+- Auto-update tmp paths now use `crypto.randomBytes(8)` instead of `process.pid`, removing a predictable-filename primitive that a co-tenant on a group-writable install dir could pre-plant a symlink at. Pre-unlink remains as the primary defense.
+- Stage detection no longer silently fails on `EACCES` of the binary directory: `existsSync` was masking permission errors as "no stage". Now logs the diagnostic and bails without destructive cleanup, so a transient permission glitch can't destroy a peer process's mid-commit stage either.
+
+### Fixed
+
+- `release.ts` download path no longer silently swallows three classes of error (writer post-finish flush errors, reader `releaseLock` failures, partial-write cleanup failures). Errors now route through an `onError` callback that the auto-updater logs to `~/.cache/worktree-cli/last-error`.
+- Removed an off-by-one in the redirect loop (`<=` instead of `<`) — the loop was allowing 6 hops while the error message claimed a limit of 5.
+- Aggregated SHA256SUMS in the release workflow now compares against the actual binary count instead of a hardcoded `expected=4` — adding or removing a build target no longer requires editing two places.
+
 ## [1.3.0] - 2026-04-17
 
 ### Added

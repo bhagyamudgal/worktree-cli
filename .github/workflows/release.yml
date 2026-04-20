@@ -102,9 +102,9 @@ jobs:
                   # would silently produce an empty SHA256SUMS that bricks
                   # every client's auto-update install.
                   count=$(ls -1 worktree-*.sha256 2>/dev/null | wc -l | tr -d ' ')
-                  expected=4
-                  if [ "$count" != "$expected" ]; then
-                      echo "expected $expected .sha256 files, got $count" >&2
+                  binaries=$(ls -1 worktree-* 2>/dev/null | grep -v '\.sha256$' | wc -l | tr -d ' ')
+                  if [ "$count" -lt 1 ] || [ "$count" != "$binaries" ]; then
+                      echo "sha256 count ($count) does not match binary count ($binaries) — abort" >&2
                       exit 1
                   fi
                   cat worktree-*.sha256 > SHA256SUMS

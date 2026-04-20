@@ -19,6 +19,7 @@ import {
 } from "../lib/release";
 import {
     cleanupStagedArtifacts,
+    probeBinaryRuns,
     recordCheckCompleted,
 } from "../lib/auto-update";
 
@@ -108,7 +109,12 @@ export const updateCommand = command({
         );
         if (!verify.ok) {
             await safeUnlink(tmpPath);
-            if (verify.kind === "sums-error") {
+            if (verify.kind === "sums-tamper") {
+                const { RED, BOLD, RESET } = COLORS;
+                console.error(
+                    `${RED}${BOLD}SECURITY ALERT${RESET}${RED}: SHA256SUMS for ${release.tag} is malformed (${verify.reason}). This is the canonical signature of supply-chain tampering. Refusing to install.${RESET}`
+                );
+            } else if (verify.kind === "sums-error") {
                 printError(
                     `SHA256SUMS is published but could not be fetched: ${verify.reason}. Refusing to install.`
                 );
@@ -139,7 +145,19 @@ export const updateCommand = command({
         if (chmodError) {
             await safeUnlink(tmpPath);
             printError(
-                `Failed to mark binary executable: ${chmodError.message}`
+                `Failed to mark binary executable: ${deepestMessage(chmodError)}`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
+
+        // Probe BEFORE rename: a SHA-valid binary that won't run on this machine
+        // (libc/codesign/macOS-version mismatch) would otherwise replace the user's
+        // working binary with one that segfaults on next launch.
+        const probe = probeBinaryRuns(tmpPath);
+        if (!probe.ok) {
+            await safeUnlink(tmpPath);
+            printError(
+                `The new release v${release.version} is not runnable on this machine (${probe.reason}). Please file an issue at https://github.com/bhagyamudgal/worktree-cli/issues.`
             );
             process.exit(EXIT_CODES.ERROR);
         }

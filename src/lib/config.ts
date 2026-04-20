@@ -81,6 +81,12 @@ function warnOnce(filePath: string, message: string): void {
 
 type ConfigScope = "project" | "global";
 
+const EXISTS_ERROR_PREFIX = "shouldAutoUpdate exists";
+const READ_ERROR_PREFIX =
+    "~/.worktreerc read failed; auto-update disabled until fixed";
+const PARSE_ERROR_PREFIX =
+    "~/.worktreerc invalid; auto-update disabled until fixed";
+
 async function readConfigFile(
     filePath: string,
     scope: ConfigScope
@@ -99,9 +105,15 @@ async function readConfigFile(
     }
     const raw = parseConfigContent(content);
     if (scope === "project" && "AUTO_UPDATE" in raw) {
+        // Validate the value too so a user moving the line to ~/.worktreerc later
+        // already knows whether they wrote a valid boolean-like or garbage.
+        const probe = booleanLike.safeParse(raw.AUTO_UPDATE);
+        const validityNote = probe.success
+            ? `; the value "${raw.AUTO_UPDATE}" parses as a boolean (would take effect once moved)`
+            : `; the value "${raw.AUTO_UPDATE}" is also invalid as a boolean (${probe.error.issues[0]?.message ?? "unknown"})`;
         warnOnce(
             `${filePath}:AUTO_UPDATE`,
-            `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead.`
+            `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead${validityNote}.`
         );
         // Strip pre-validate so `AUTO_UPDATE=junk` doesn't discard valid sibling keys.
         delete raw.AUTO_UPDATE;
@@ -135,9 +147,7 @@ function decideAutoUpdateFromContent(
         return validateConfig(raw);
     });
     if (parseError) {
-        onError?.(
-            `~/.worktreerc invalid; auto-update disabled until fixed: ${parseError.message}`
-        );
+        onError?.(`${PARSE_ERROR_PREFIX}: ${parseError.message}`);
         return false;
     }
     return parsed.AUTO_UPDATE;
@@ -153,15 +163,13 @@ async function shouldAutoUpdate(onError?: AutoUpdateOnError): Promise<boolean> {
         file.exists()
     );
     if (existsError) {
-        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
+        onError?.(`${EXISTS_ERROR_PREFIX}: ${existsError.message}`);
         return false;
     }
     if (!isExists) return decideAutoUpdateFromContent(null, onError);
     const { data: content, error: readError } = await tryCatch(file.text());
     if (readError) {
-        onError?.(
-            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
-        );
+        onError?.(`${READ_ERROR_PREFIX}: ${readError.message}`);
         return false;
     }
     return decideAutoUpdateFromContent(content, onError);
@@ -174,7 +182,7 @@ function shouldAutoUpdateSync(onError?: AutoUpdateOnError): boolean {
         return fs.existsSync(filePath);
     });
     if (existsError) {
-        onError?.(`shouldAutoUpdate exists: ${existsError.message}`);
+        onError?.(`${EXISTS_ERROR_PREFIX}: ${existsError.message}`);
         return false;
     }
     if (!isExists) return decideAutoUpdateFromContent(null, onError);
@@ -182,9 +190,7 @@ function shouldAutoUpdateSync(onError?: AutoUpdateOnError): boolean {
         return fs.readFileSync(filePath, "utf8");
     });
     if (readError) {
-        onError?.(
-            `~/.worktreerc read failed; auto-update disabled until fixed: ${readError.message}`
-        );
+        onError?.(`${READ_ERROR_PREFIX}: ${readError.message}`);
         return false;
     }
     return decideAutoUpdateFromContent(content, onError);

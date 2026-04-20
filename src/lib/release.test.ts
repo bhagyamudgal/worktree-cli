@@ -38,17 +38,41 @@ describe("compareVersions", () => {
         expect(compareVersions("1.2.3-rc.1", "1.2.4")).toBeLessThan(0);
     });
 
-    it("orders prerelease tags lexicographically (NOT strict SemVer)", () => {
+    it("orders prerelease tags per SemVer 2.0 §11", () => {
+        // Numeric within-identifier comparison.
         expect(compareVersions("1.2.3-beta.1", "1.2.3-beta.2")).toBeLessThan(0);
+        // Lex on string identifiers.
         expect(compareVersions("1.2.3-rc.1", "1.2.3-beta.1")).toBeGreaterThan(
             0
         );
+        // Equal prereleases.
         expect(compareVersions("1.2.3-alpha", "1.2.3-alpha")).toBe(0);
     });
 
-    it("compares numeric prerelease segments as strings (rc.10 < rc.2)", () => {
-        // Non-strict SemVer: lexicographic prerelease ordering (rc.10 < rc.2).
-        expect(compareVersions("1.2.3-rc.10", "1.2.3-rc.2")).toBeLessThan(0);
+    it("compares numeric prerelease identifiers numerically (SemVer 2.0)", () => {
+        // SemVer 2.0 §11.4.1: numeric identifiers compare numerically — rc.10 > rc.2.
+        expect(compareVersions("1.2.3-rc.10", "1.2.3-rc.2")).toBeGreaterThan(0);
+        expect(compareVersions("1.2.3-rc.2", "1.2.3-rc.10")).toBeLessThan(0);
+        expect(compareVersions("1.2.3-alpha.9", "1.2.3-alpha.11")).toBeLessThan(
+            0
+        );
+    });
+
+    it("treats numeric identifiers as lower precedence than string identifiers", () => {
+        // SemVer 2.0 §11.4.3: numeric identifiers always have lower precedence than
+        // alphanumeric identifiers within the same prerelease position.
+        expect(
+            compareVersions("1.0.0-alpha.1", "1.0.0-alpha.beta")
+        ).toBeLessThan(0);
+    });
+
+    it("longer prerelease wins when all preceding identifiers equal", () => {
+        // SemVer 2.0 §11.4.4: a larger set of fields has higher precedence than
+        // a smaller set, when all preceding identifiers are equal.
+        expect(compareVersions("1.0.0-alpha", "1.0.0-alpha.1")).toBeLessThan(0);
+        expect(
+            compareVersions("1.0.0-alpha.beta", "1.0.0-alpha.beta.1")
+        ).toBeLessThan(0);
     });
 
     it("never returns NaN for garbage input", () => {
@@ -375,7 +399,7 @@ describe("verifyAssetAgainstSums", () => {
         expect(result.retryable).toBe(true);
     });
 
-    it("returns non-retryable sums-error when SHA256SUMS contains duplicate entry (tampering)", async () => {
+    it("returns sums-tamper kind when SHA256SUMS contains duplicate entry (tampering)", async () => {
         const dupeBody = [
             "a".repeat(64) + "  " + ASSET_NAME,
             "b".repeat(64) + "  " + ASSET_NAME,
@@ -389,11 +413,12 @@ describe("verifyAssetAgainstSums", () => {
         ]);
         expect(result.ok).toBe(false);
         if (result.ok) return;
-        expect(result.kind).toBe("sums-error");
-        if (result.kind !== "sums-error") return;
-        // Duplicate entries are tampering, not transient — must NOT retry.
-        expect(result.retryable).toBe(false);
-        expect(result.reason).toMatch(/parse|Duplicate/);
+        // Distinct kind from "sums-error" so foreground/background paths can
+        // escalate (loud red error / TAMPER: log prefix) instead of treating
+        // tampering the same as a transient outage.
+        expect(result.kind).toBe("sums-tamper");
+        if (result.kind !== "sums-tamper") return;
+        expect(result.reason).toMatch(/Duplicate/);
     });
 
     it("returns missing-entry when SHA256SUMS exists but has no row for asset", async () => {

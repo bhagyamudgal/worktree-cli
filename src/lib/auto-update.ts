@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -152,10 +153,32 @@ function cleanupStagedArtifacts(): void {
     safeUnlinkSync(getMetaSidecarPath());
 }
 
-function isWithinGracePeriod(filePath: string): boolean {
-    const { data: stat } = tryCatchSync(function () {
+// true=exists, false=ENOENT, null=non-ENOENT error logged; caller must bail without
+// destructive cleanup (don't unlink anything we can't stat reliably).
+function checkExists(
+    filePath: string,
+    kind: "apply" | "check"
+): boolean | null {
+    const { error } = tryCatchSync(function () {
         return fs.statSync(filePath);
     });
+    if (!error) return true;
+    if (isEnoent(error)) return false;
+    appendLastError(kind, `stat ${filePath}: ${error.message}`);
+    return null;
+}
+
+function isWithinGracePeriod(filePath: string): boolean {
+    const { data: stat, error } = tryCatchSync(function () {
+        return fs.statSync(filePath);
+    });
+    if (error) {
+        if (isEnoent(error)) return false;
+        // Non-ENOENT (EACCES/EIO) — surface the diagnostic and be conservative:
+        // assume in-grace so we never destroy a peer's stage on incomplete info.
+        appendLastError("apply", `grace-stat: ${error.message}`);
+        return true;
+    }
     if (!stat) return false;
     return Date.now() - stat.mtimeMs < STAGING_ORPHAN_GRACE_MS;
 }
@@ -171,14 +194,18 @@ function applyPendingUpdate(): void {
         if (!isStandalone()) return;
         const stagedPath = getStagingPath();
         const metaPath = getMetaSidecarPath();
-        if (!fs.existsSync(stagedPath)) {
+        const stagedExists = checkExists(stagedPath, "apply");
+        if (stagedExists === null) return;
+        if (!stagedExists) {
             // Within grace window, assume concurrent producer; past it, reap orphan.
             if (isWithinGracePeriod(metaPath)) return;
             safeUnlinkSync(metaPath);
             return;
         }
 
-        if (!fs.existsSync(metaPath)) {
+        const metaExists = checkExists(metaPath, "apply");
+        if (metaExists === null) return;
+        if (!metaExists) {
             if (isWithinGracePeriod(stagedPath)) return;
             safeUnlinkSync(stagedPath);
             appendLastError(
@@ -412,6 +439,9 @@ async function runBackgroundUpdateCheck(): Promise<void> {
             "check",
             `fetchLatestRelease: ${releaseError?.message ?? "unknown"}`
         );
+        // Bump throttle on transient network failures so we don't burn the GitHub
+        // API quota retrying on every CLI invocation while api.github.com is down.
+        recordCheckCompleted();
         return;
     }
 
@@ -435,18 +465,22 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     const binaryDir = getBinaryDir();
     const tmpPath = path.join(
         binaryDir,
-        `${STAGING_FILENAME}.${process.pid}.tmp`
+        `${STAGING_FILENAME}.${randomBytes(8).toString("hex")}.tmp`
     );
 
     // Pre-unlink to prevent the write from following a planted symlink.
     safeUnlinkSync(tmpPath);
-    const { error: dlError } = await tryCatch(downloadAsset(asset, tmpPath));
+    const { error: dlError } = await tryCatch(
+        downloadAsset(asset, tmpPath, undefined, function (op, downloadErr) {
+            appendLastError("check", `${op}: ${downloadErr.message}`);
+        })
+    );
     if (dlError) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `download: ${dlError.message}`);
-        if (classifyWriteError(dlError) !== null) {
-            recordCheckCompleted();
-        }
+        // Bump throttle on every download failure (write OR network) so a persistent
+        // outage doesn't trigger a re-download cycle on every CLI invocation.
+        recordCheckCompleted();
         return;
     }
 
@@ -458,7 +492,15 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     );
     if (!verify.ok) {
         safeUnlinkSync(tmpPath);
-        if (verify.kind === "sums-error") {
+        if (verify.kind === "sums-tamper") {
+            // Loud TAMPER: prefix in the log so a curious user grepping last-error
+            // can distinguish supply-chain integrity hits from generic outages.
+            appendLastError(
+                "check",
+                `TAMPER: SHA256SUMS for ${assetName} is malformed (${verify.reason}) — refusing to stage`
+            );
+            recordCheckCompleted();
+        } else if (verify.kind === "sums-error") {
             appendLastError(
                 "check",
                 `SHA256SUMS fetch failed — refusing to stage: ${verify.reason}`
@@ -503,6 +545,10 @@ async function runBackgroundUpdateCheck(): Promise<void> {
     if (!probe.ok) {
         safeUnlinkSync(tmpPath);
         appendLastError("check", `probe: ${probe.reason}`);
+        // Treat probe failure as structural for THIS release — bumping throttle
+        // prevents a re-download/re-probe loop burning ~50MB on every CLI invocation
+        // until upstream republishes a fixed binary.
+        recordCheckCompleted();
         return;
     }
 
@@ -534,7 +580,7 @@ async function runBackgroundUpdateCheck(): Promise<void> {
 
     const metaTmpPath = path.join(
         binaryDir,
-        `${META_SIDECAR_FILENAME}.${process.pid}.tmp`
+        `${META_SIDECAR_FILENAME}.${randomBytes(8).toString("hex")}.tmp`
     );
     const sidecarContent = formatSidecar({
         version: release.version,
@@ -642,6 +688,7 @@ export {
     appendBackgroundCheckPanic,
     applyPendingUpdate,
     cleanupStagedArtifacts,
+    probeBinaryRuns,
     recordCheckCompleted,
     scheduleBackgroundUpdateCheck,
     runBackgroundUpdateCheck,
