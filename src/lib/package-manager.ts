@@ -1,6 +1,7 @@
 import path from "node:path";
 import { run } from "./shell";
 import { printInfo, printSuccess, printWarn } from "./logger";
+import { tryCatch } from "./try-catch";
 
 const LOCKFILE_MAP = [
     { file: "pnpm-lock.yaml", pm: "pnpm" },
@@ -22,6 +23,27 @@ async function detectPackageManager(
     return null;
 }
 
+async function hasPrepareScript(cwd: string): Promise<boolean> {
+    const { data } = await tryCatch(
+        Bun.file(path.join(cwd, "package.json")).json()
+    );
+    return typeof data?.scripts?.prepare === "string";
+}
+
+async function runPrepareScript(
+    pm: PackageManager,
+    cwd: string
+): Promise<void> {
+    if (!(await hasPrepareScript(cwd))) return;
+    printInfo(`  Running ${pm} run prepare...`);
+    const result = await run(pm, ["run", "prepare"], { cwd, inherit: true });
+    if (result.exitCode !== 0) {
+        printWarn("  prepare script failed. Git hooks may be inactive.");
+        return;
+    }
+    printSuccess("  Prepare script complete.");
+}
+
 async function installDependencies(
     pm: PackageManager,
     cwd: string
@@ -35,6 +57,7 @@ async function installDependencies(
         return;
     }
     printSuccess("  Dependencies installed.");
+    await runPrepareScript(pm, cwd);
 }
 
 export { detectPackageManager, installDependencies };
