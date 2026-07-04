@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- After installing dependencies for a new worktree, `worktree` now runs the project's `prepare` script (e.g. Husky git-hook setup) when one is defined. Previously, if your global npm/pnpm config sets `ignore-scripts=true` (a common supply-chain hardening), `install` skipped `prepare`, leaving Git hooks — pre-commit formatting/linting — inactive in fresh worktrees.
+
 ## [1.3.0] - 2026-04-20
 
 ### Added
@@ -17,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-update now bumps its 24-hour throttle when a release is genuinely unusable on the current platform (probe failure), when GitHub is unreachable, or when a download fails for any reason. Previously, every CLI invocation re-downloaded ~50 MB and re-hit the GitHub API, which could trip the 60-requests-per-hour anonymous rate limit on a heavy day.
 - Foreground `worktree update` now smoke-tests the downloaded binary (`--version`) before atomically replacing the installed binary. A SHA256-valid release that won't run on the current machine (libc/codesign/macOS-version mismatch) is now refused with a clear error instead of leaving the user with a broken `worktree`.
 - A `SHA256SUMS` file containing **duplicate entries** — the canonical signature of supply-chain tampering — now triggers a loud red `SECURITY ALERT` in `worktree update` and a `TAMPER:` prefix in the background error log, instead of being reported as a generic "could not be fetched" outage.
-- Project-scope `AUTO_UPDATE=...` is still ignored (matches existing behaviour) but the warning now also reports whether the value is a *valid* boolean-like, so a user moving the line to `~/.worktreerc` later already knows whether it would have taken effect.
+- Project-scope `AUTO_UPDATE=...` is still ignored (matches existing behaviour) but the warning now also reports whether the value is a _valid_ boolean-like, so a user moving the line to `~/.worktreerc` later already knows whether it would have taken effect.
 - Version comparison now follows SemVer 2.0 §11 for prerelease ordering: `1.2.3-rc.10` is now correctly **greater than** `1.2.3-rc.2`. Previously the comparator used lexicographic string ordering, which would have stranded users on `rc.2` from ever auto-updating to `rc.10`.
 - Release binaries are slightly smaller (minified, debug symbols stripped). No behavioural change.
 - Release workflow smoke-tests each built binary (`--version`) before publishing so a broken build can't reach users.
