@@ -33,6 +33,7 @@ worktree create feature-auth --editor code      # open in VS Code
 worktree create colleague/feature-xyz           # tracks remote branch if it exists
 worktree open feature-auth                      # open existing worktree in editor
 worktree open feature-auth --editor cursor      # open in Cursor
+worktree open feature-auth --editor zed         # open in Zed
 worktree list                                   # list all worktrees with status
 worktree remove feature-auth                    # remove worktree + cleanup branch
 ```
@@ -45,7 +46,7 @@ On `create`, the CLI:
 2. Creates a git worktree — if `origin/<name>` exists, it tracks the remote branch; otherwise branches from `--base` or `DEFAULT_BASE`
 3. Copies `.env` and `.env.local` files from the main repo (searches up to 4 levels deep)
 4. Installs dependencies (auto-detects pnpm/yarn/npm/bun)
-5. Opens in your editor (VS Code / Cursor, auto-detected or prompted)
+5. Opens in your editor (VS Code / Cursor / Zed, auto-detected or prompted)
 
 On `list`, it shows each worktree with:
 

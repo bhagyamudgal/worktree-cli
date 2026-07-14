@@ -5,14 +5,16 @@ import { getGitRoot, getDefaultBranch, selectWorktree } from "../lib/git";
 import { loadConfig } from "../lib/config";
 import { resolveEditor, openInEditor } from "../lib/editor";
 import { printError } from "../lib/logger";
-import { EXIT_CODES } from "../lib/constants";
+import { EXIT_CODES, SUPPORTED_EDITORS } from "../lib/constants";
 
 export const openCommand = command({
     name: "open",
     desc: "Open an existing worktree in editor",
     options: {
         name: positional("name").desc("Worktree name (interactive if omitted)"),
-        editor: string("editor").desc("Editor to open (code or cursor)"),
+        editor: string("editor").desc(
+            `Editor to open (${SUPPORTED_EDITORS.join(", ")})`
+        ),
     },
     handler: async (opts) => {
         const root = await getGitRoot();

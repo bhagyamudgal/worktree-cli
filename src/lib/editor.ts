@@ -51,7 +51,7 @@ async function resolveEditor(preferred?: string): Promise<string | null> {
 function openInEditor(editor: string | null, editorPath: string): void {
     if (!editor) {
         printWarn(
-            `  No editor (code/cursor) found. Open manually: ${editorPath}`
+            `  No editor found (${SUPPORTED_EDITORS.join(", ")}). Open manually: ${editorPath}`
         );
         return;
     }

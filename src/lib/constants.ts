@@ -11,12 +11,13 @@ const COLORS = {
 
 const DEFAULT_WORKTREE_DIR = ".worktrees";
 
-const SUPPORTED_EDITORS = ["code", "cursor"] as const;
+const SUPPORTED_EDITORS = ["code", "cursor", "zed"] as const;
 type EditorChoice = (typeof SUPPORTED_EDITORS)[number];
 
 const EDITOR_LABELS: Record<EditorChoice, string> = {
     code: "VS Code",
     cursor: "Cursor",
+    zed: "Zed",
 } as const;
 
 const ENV_FILE_NAMES = [".env", ".env.local"] as const;

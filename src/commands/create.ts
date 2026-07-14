@@ -24,7 +24,7 @@ import {
     printStep,
     COLORS,
 } from "../lib/logger";
-import { EXIT_CODES } from "../lib/constants";
+import { EXIT_CODES, SUPPORTED_EDITORS } from "../lib/constants";
 
 export const createCommand = command({
     name: "create",
@@ -32,7 +32,9 @@ export const createCommand = command({
     options: {
         name: positional("name").desc("Worktree/branch name").required(),
         base: string("base").desc("Base branch to create from"),
-        editor: string("editor").desc("Editor to open (code or cursor)"),
+        editor: string("editor").desc(
+            `Editor to open (${SUPPORTED_EDITORS.join(", ")})`
+        ),
     },
     handler: async (opts) => {
         const root = await getGitRoot();
