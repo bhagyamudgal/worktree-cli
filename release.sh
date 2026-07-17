@@ -46,7 +46,7 @@ fi
 
 echo ""
 echo -e "  Creating tag ${BOLD}${TAG}${NC}..."
-git tag "$TAG"
+git tag "$TAG" -m "$TAG"
 
 echo -e "  Pushing tag to origin..."
 git push origin "$TAG"
