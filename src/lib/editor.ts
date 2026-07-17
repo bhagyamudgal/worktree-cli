@@ -60,7 +60,9 @@ function openInEditor(editor: string | null, editorPath: string): void {
         editor in EDITOR_LABELS
             ? EDITOR_LABELS[editor as EditorChoice]
             : editor;
-    Bun.spawn([editor, editorPath], { stdout: "inherit", stderr: "inherit" });
+    const args =
+        editor === "zed" ? [editor, "-n", editorPath] : [editor, editorPath];
+    Bun.spawn(args, { stdout: "inherit", stderr: "inherit" });
     printSuccess(`  Opened in ${label}.`);
 }
 
