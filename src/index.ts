@@ -1,4 +1,5 @@
 import { run } from "@drizzle-team/brocli";
+import { cleanCommand } from "./commands/clean";
 import { createCommand } from "./commands/create";
 import { internalUpdateCheckCommand } from "./commands/internal-update-check";
 import { listCommand } from "./commands/list";
@@ -48,6 +49,7 @@ if (!shouldSkipAutoUpdate()) {
 
 run(
     [
+        cleanCommand,
         createCommand,
         listCommand,
         openCommand,

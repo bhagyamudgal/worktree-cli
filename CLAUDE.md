@@ -15,7 +15,7 @@ bun run format               # Prettier
 ## Architecture
 
 - `src/index.ts` — Entry point. Registers commands with brocli's `run()`.
-- `src/commands/` — One file per CLI command (create, list, open, remove). Each exports a brocli `command()`.
+- `src/commands/` — One file per CLI command. Each exports a brocli `command()`.
 - `src/lib/` — Shared utilities:
   - `git.ts` — All git subprocess wrappers. Uses `run()` from `shell.ts` with array args.
   - `shell.ts` — Thin `Bun.spawn` wrapper. Returns `{ stdout, stderr, exitCode }`.

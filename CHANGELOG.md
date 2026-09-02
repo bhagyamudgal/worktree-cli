@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `worktree clean` previews and removes registered worktrees that are merged into the origin default branch and have no work in progress. Git-ignored files and Husky's generated `.husky/_` files do not block cleanup; worktrees containing submodules are left untouched. Use `--yes` to skip confirmation.
+
 ### Fixed
 
 - `release.sh` no longer fails to create the release tag when git is configured to sign tags (`tag.gpgsign = true`); it now always creates an annotated tag with the version as its message.
