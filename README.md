@@ -144,13 +144,10 @@ bun run format               # Prettier
 ### Releasing
 
 ```bash
-# 1. Update version in package.json
-# 2. Update CHANGELOG.md
-# 3. Commit, then run:
-./release.sh
+bun changeset
 ```
 
-This tags the version and pushes to trigger GitHub Actions, which builds binaries for all platforms and creates a GitHub Release.
+Commit the generated changeset with the user-visible change. Merging it to `main` opens a `chore: version packages` pull request. Merging that pull request updates the package version and changelog, builds all platform binaries, and creates the GitHub Release.
 
 ### CI
 

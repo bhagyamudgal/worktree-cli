@@ -17,6 +17,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "bun test",
+    "changeset": "changeset",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -31,6 +32,7 @@
     "zod": "^4"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.0",
     "@eslint/js": "^10.0.1",
     "@types/bun": "latest",
     "eslint": "^10.2.0",

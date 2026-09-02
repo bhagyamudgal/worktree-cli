@@ -2,14 +2,99 @@ name: Release
 
 on:
     push:
-        tags: ["v*"]
+        branches:
+            - main
 
-permissions:
-    contents: write
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
 
 jobs:
+    version:
+        name: Open Version Pull Request
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+            pull-requests: write
+
+        outputs:
+            version: ${{ steps.package.outputs.version }}
+            release-sha: ${{ steps.package.outputs.release-sha }}
+            is-released: ${{ steps.released.outputs.is-released }}
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Cache Bun dependencies
+              uses: actions/cache@v4
+              with:
+                  path: ~/.bun/install/cache
+                  key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-bun-
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Collect changesets into a version pull request
+              uses: changesets/action@v2
+              with:
+                  commit-message: "chore: version packages"
+                  pr-title: "chore: version packages"
+
+            - name: Read the package version from the triggering commit
+              id: package
+              run: |
+                  version=$(git show "${GITHUB_SHA}:package.json" | jq -er '.version')
+                  release_sha=$(git log -1 --first-parent -S "\"version\": \"$version\"" --format=%H "$GITHUB_SHA" -- package.json)
+                  if [ -z "$release_sha" ]; then
+                      echo "::error::Could not find the commit that introduced version $version"
+                      exit 1
+                  fi
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  echo "release-sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+            - name: Check whether that version is released
+              id: released
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REPOSITORY: ${{ github.repository }}
+                  VERSION: ${{ steps.package.outputs.version }}
+                  RELEASE_SHA: ${{ steps.package.outputs.release-sha }}
+              run: |
+                  bash .github/scripts/verify-release-tag.sh "$VERSION" "$RELEASE_SHA"
+
+                  if release=$(gh api "repos/$REPOSITORY/releases/tags/v$VERSION" 2>&1); then
+                      is_draft=$(printf '%s\n' "$release" | jq -r '.draft')
+                      if [ "$is_draft" = "false" ]; then
+                          echo "is-released=true" >> "$GITHUB_OUTPUT"
+                      elif [ "$is_draft" = "true" ]; then
+                          echo "is-released=false" >> "$GITHUB_OUTPUT"
+                      else
+                          echo "::error::GitHub returned an invalid release state for v$VERSION"
+                          exit 1
+                      fi
+                  elif printf '%s\n' "$release" | grep -q "HTTP 404"; then
+                      echo "is-released=false" >> "$GITHUB_OUTPUT"
+                  else
+                      printf '%s\n' "$release"
+                      echo "::error::Could not determine whether v$VERSION is released"
+                      exit 1
+                  fi
+
     build:
         name: Build ${{ matrix.target }}
+        needs: version
+        if: needs.version.outputs.is-released == 'false'
         runs-on: ${{ matrix.os }}
         strategy:
             matrix:
@@ -29,6 +114,8 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.version.outputs.release-sha }}
             - uses: oven-sh/setup-bun@v2
             - run: bun install --frozen-lockfile
 
@@ -86,9 +173,22 @@ jobs:
 
     release:
         name: Create Release
-        needs: build
+        needs:
+            - version
+            - build
         runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+
+        env:
+            VERSION: ${{ needs.version.outputs.version }}
+
         steps:
+            - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
             - uses: actions/download-artifact@v8
               with:
                   path: artifacts
@@ -97,44 +197,60 @@ jobs:
             - name: Aggregate SHA256SUMS
               run: |
                   cd artifacts
-                  # Fail-fast: if no .sha256 sidecars were downloaded (e.g.,
-                  # an upload-artifact rename regression), the cat below
-                  # would silently produce an empty SHA256SUMS that bricks
-                  # every client's auto-update install.
                   count=$(ls -1 worktree-*.sha256 2>/dev/null | wc -l | tr -d ' ')
                   binaries=$(ls -1 worktree-* 2>/dev/null | grep -v '\.sha256$' | wc -l | tr -d ' ')
                   if [ "$count" -lt 1 ] || [ "$count" != "$binaries" ]; then
-                      echo "sha256 count ($count) does not match binary count ($binaries) — abort" >&2
+                      echo "sha256 count ($count) does not match binary count ($binaries), aborting" >&2
                       exit 1
                   fi
                   cat worktree-*.sha256 > SHA256SUMS
                   rm worktree-*.sha256
                   if [ ! -s SHA256SUMS ]; then
-                      echo "SHA256SUMS empty after aggregation — abort" >&2
+                      echo "SHA256SUMS is empty, aborting" >&2
                       exit 1
                   fi
                   cat SHA256SUMS
 
             - run: chmod +x artifacts/worktree-*
 
-            # Create the release as a draft and upload all assets to it.
-            # Publishing happens in the next step so `releases/latest` never
-            # returns a release where binaries are attached but SHA256SUMS
-            # is still being uploaded — that window would let clients fall
-            # through to the TLS-only "not-published" path and install
-            # unverified.
-            - uses: softprops/action-gh-release@v2
+            - name: Create or verify release tag
+              env:
+                  RELEASE_SHA: ${{ needs.version.outputs.release-sha }}
+              run: |
+                  if ! git push origin "${RELEASE_SHA}:refs/tags/v${VERSION}"; then
+                      echo "Tag creation did not succeed; checking the existing tag"
+                  fi
+                  bash .github/scripts/verify-release-tag.sh "$VERSION" "$RELEASE_SHA" true
+
+            - name: Create draft GitHub Release
+              uses: softprops/action-gh-release@v2
               with:
+                  tag_name: v${{ env.VERSION }}
+                  target_commitish: ${{ needs.version.outputs.release-sha }}
+                  name: Release ${{ env.VERSION }}
+                  body: |
+                      ## worktree-cli ${{ env.VERSION }}
+
+                      See [CHANGELOG.md](https://github.com/bhagyamudgal/worktree-cli/blob/main/CHANGELOG.md) for what changed.
+
+                      ### Installation
+
+                      ```bash
+                      curl -fsSL https://raw.githubusercontent.com/bhagyamudgal/worktree-cli/main/install.sh | bash
+                      ```
+
+                      Verify downloads using `SHA256SUMS`.
                   draft: true
-                  generate_release_notes: true
+                  prerelease: false
                   files: |
                       artifacts/worktree-*
                       artifacts/SHA256SUMS
 
-            - name: Publish release (flip draft to public)
+            - name: Publish GitHub Release
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  REF_NAME: ${{ github.ref_name }}
-                  REPO: ${{ github.repository }}
+                  REPOSITORY: ${{ github.repository }}
+                  RELEASE_SHA: ${{ needs.version.outputs.release-sha }}
               run: |
-                  gh release edit "$REF_NAME" --repo "$REPO" --draft=false
+                  bash .github/scripts/verify-release-tag.sh "$VERSION" "$RELEASE_SHA" true
+                  gh release edit "v$VERSION" --repo "$REPOSITORY" --draft=false
