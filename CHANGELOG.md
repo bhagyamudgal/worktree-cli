@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0
+
+### Minor Changes
+
+- 065c8e1: Add `worktree setup` to configure `.worktreerc` interactively (base branch, worktree dir, gitignore wiring) instead of writing the file by hand
+
 ## 1.4.0
 
 ### Minor Changes
