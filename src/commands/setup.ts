@@ -252,6 +252,23 @@ export const setupCommand = command({
             );
             process.exit(EXIT_CODES.ERROR);
         }
+        const { data: realRoot, error: realRootError } = await tryCatch(
+            fs.realpath(root)
+        );
+        const { data: realDir, error: realDirError } = await tryCatch(
+            fs.realpath(worktreeBaseDir)
+        );
+        if (
+            realRootError ||
+            realDirError ||
+            realDir === realRoot ||
+            !realDir.startsWith(realRoot + path.sep)
+        ) {
+            printError(
+                `Worktree directory '${dir}' resolves outside the repository. Use a real directory inside it.`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
         await fs
             .writeFile(path.join(worktreeBaseDir, ".gitignore"), "*\n", {
                 flag: "wx",

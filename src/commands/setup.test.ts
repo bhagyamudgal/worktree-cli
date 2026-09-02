@@ -187,6 +187,19 @@ describe("setup command", () => {
         expect(await readFile(root, ".worktreerc")).toBeNull();
     });
 
+    it("rejects a worktree directory symlinked outside the repository", async () => {
+        const { directory, root } = await createTestRepository();
+        const external = path.join(directory, "external");
+        await fs.mkdir(external);
+        await fs.symlink(external, path.join(root, ".worktrees"));
+
+        const result = await runSetup(root, ["--base", "main", "--yes"]);
+
+        expect(result.exitCode).toBe(1);
+        expect(await readFile(root, ".worktreerc")).toBeNull();
+        expect(await readFile(external, ".gitignore")).toBeNull();
+    });
+
     it("honors a custom directory and stays idempotent on rerun", async () => {
         const { root } = await createTestRepository();
 
