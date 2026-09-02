@@ -233,6 +233,7 @@ export const cleanCommand = command({
             });
             if (p.isCancel(confirmed) || !confirmed) {
                 printInfo("Cancelled.");
+                if (failures.length > 0) process.exit(EXIT_CODES.ERROR);
                 return;
             }
         }

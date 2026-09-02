@@ -55,19 +55,23 @@ async function createTestRepository(): Promise<TestRepository> {
     return { directory, root };
 }
 
-async function runClean(root: string): Promise<{
+async function runClean(
+    root: string,
+    isConfirmed = true
+): Promise<{
     stderr: string;
     exitCode: number;
 }> {
-    const cliProcess = Bun.spawn(
-        [process.execPath, "run", cliPath, "clean", "--yes"],
-        {
-            cwd: root,
-            env: { ...Bun.env, WORKTREE_NO_UPDATE: "1", NO_COLOR: "1" },
-            stdout: "pipe",
-            stderr: "pipe",
-        }
-    );
+    const args = [process.execPath, "run", cliPath, "clean"];
+    if (isConfirmed) args.push("--yes");
+
+    const cliProcess = Bun.spawn(args, {
+        cwd: root,
+        env: { ...Bun.env, WORKTREE_NO_UPDATE: "1", NO_COLOR: "1" },
+        stdin: isConfirmed ? "ignore" : new TextEncoder().encode("n\n"),
+        stdout: "pipe",
+        stderr: "pipe",
+    });
     const [stderr, exitCode] = await Promise.all([
         new Response(cliProcess.stderr).text(),
         cliProcess.exited,
@@ -477,6 +481,43 @@ describe("clean command", () => {
         expect(await fs.stat(worktreePath).catch(() => null)).not.toBeNull();
         expect(result.stderr).toContain("Inspection failures (1)");
         expect(result.stderr).toContain("could not verify merge status");
+    });
+
+    it("fails when cancellation follows an inspection failure", async () => {
+        const { directory, root } = await createTestRepository();
+        const cleanPath = path.join(directory, "clean-worktree");
+        const unreadablePath = path.join(directory, "unreadable-worktree");
+        await run(
+            "git",
+            ["worktree", "add", "-b", "clean-branch", cleanPath, "main"],
+            { cwd: root }
+        );
+        await run(
+            "git",
+            [
+                "worktree",
+                "add",
+                "-b",
+                "unreadable-branch",
+                unreadablePath,
+                "main",
+            ],
+            { cwd: root }
+        );
+        const indexPath = await run(
+            "git",
+            ["rev-parse", "--git-path", "index"],
+            { cwd: unreadablePath }
+        );
+        await fs.writeFile(indexPath.stdout, "invalid index\n");
+
+        const result = await runClean(root, false);
+
+        expect(result.exitCode).toBe(1);
+        expect(await fs.stat(cleanPath).catch(() => null)).not.toBeNull();
+        expect(await fs.stat(unreadablePath).catch(() => null)).not.toBeNull();
+        expect(result.stderr).toContain("Inspection failures (1)");
+        expect(result.stderr).toContain("Cancelled.");
     });
 
     it("keeps a branch when its tip no longer matches the verified HEAD", async () => {
