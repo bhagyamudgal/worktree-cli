@@ -18,10 +18,27 @@ const CUSTOM_OPTION = "__custom__";
 const COMMON_BRANCHES = ["main", "master", "dev", "develop"] as const;
 
 function formatValue(value: string): string {
-    if (/[\s#"']/.test(value)) {
-        return `"${value.replace(/"/g, '\\"')}"`;
-    }
+    if (/[\s#']/.test(value)) return `"${value}"`;
     return value;
+}
+
+function validateDirValue(dir: string): string | null {
+    if (dir === "") return "Directory name is required.";
+    if (dir.includes('"') || dir.includes("\n")) {
+        return "Directory name cannot contain quotes or newlines.";
+    }
+    if (dir.startsWith("/") || dir.includes("..") || dir.includes(path.sep)) {
+        return "Use a plain directory name (e.g. .worktrees).";
+    }
+    return null;
+}
+
+function resolveDirInRoot(root: string, dir: string): string | null {
+    const resolved = path.resolve(root, dir);
+    if (resolved === root || !resolved.startsWith(root + path.sep)) {
+        return null;
+    }
+    return resolved;
 }
 
 async function normalizeBase(input: string): Promise<string | null> {
@@ -64,6 +81,12 @@ async function collectBaseCandidates(
     }
 
     return candidates;
+}
+
+async function resolveOriginHeadBase(): Promise<string | null> {
+    const head = await getDefaultBranch();
+    if (!head) return null;
+    return normalizeBase(`origin/${head}`);
 }
 
 async function promptForBase(
@@ -110,16 +133,7 @@ async function promptForDir(currentDir: string): Promise<string> {
         message: "Worktree directory name",
         initialValue: currentDir,
         validate: function (value) {
-            const trimmed = value.trim();
-            if (trimmed === "") return "Directory name is required.";
-            if (
-                trimmed.startsWith("/") ||
-                trimmed.includes("..") ||
-                trimmed.includes(path.sep)
-            ) {
-                return "Use a plain directory name (e.g. .worktrees).";
-            }
-            return undefined;
+            return validateDirValue(value.trim()) ?? undefined;
         },
     });
     if (p.isCancel(entered)) {
@@ -173,13 +187,25 @@ export const setupCommand = command({
             }
             base = normalized;
         } else if (opts.yes) {
-            if (!currentBase) {
-                printError(
-                    "No DEFAULT_BASE configured. Re-run with --base <branch>."
-                );
-                process.exit(EXIT_CODES.ERROR);
+            if (currentBase) {
+                const normalized = await normalizeBase(currentBase);
+                if (!normalized) {
+                    printError(
+                        `Configured DEFAULT_BASE '${currentBase}' not found locally or on origin. Re-run with --base <branch>.`
+                    );
+                    process.exit(EXIT_CODES.ERROR);
+                }
+                base = normalized;
+            } else {
+                const fallback = await resolveOriginHeadBase();
+                if (!fallback) {
+                    printError(
+                        "No DEFAULT_BASE configured. Re-run with --base <branch>."
+                    );
+                    process.exit(EXIT_CODES.ERROR);
+                }
+                base = fallback;
             }
-            base = currentBase;
         } else {
             if (process.stdin.isTTY !== true) {
                 printError(
@@ -202,33 +228,61 @@ export const setupCommand = command({
         let dir: string;
         if (opts.dir !== undefined) {
             dir = opts.dir.trim();
-            if (
-                dir === "" ||
-                dir.startsWith("/") ||
-                dir.includes("..") ||
-                dir.includes(path.sep)
-            ) {
-                printError(
-                    `Invalid worktree directory '${opts.dir}'. Use a plain name like ${DEFAULT_WORKTREE_DIR}.`
-                );
-                process.exit(EXIT_CODES.ERROR);
-            }
         } else if (opts.yes || process.stdin.isTTY !== true) {
             dir = currentDir;
         } else {
             dir = await promptForDir(currentDir);
         }
+        const dirError = validateDirValue(dir);
+        const worktreeBaseDir =
+            dirError === null ? resolveDirInRoot(root, dir) : null;
+        if (dirError !== null || worktreeBaseDir === null) {
+            printError(
+                `Invalid worktree directory '${dir}'. Use a plain name like ${DEFAULT_WORKTREE_DIR} inside the repository.`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
 
-        const next: Record<string, string> = { ...raw };
-        next.DEFAULT_BASE = base;
-        next.WORKTREE_DIR = dir;
-        const otherKeys = Object.keys(raw).filter(
-            (key) => key !== "DEFAULT_BASE" && key !== "WORKTREE_DIR"
+        const { error: mkdirError } = await tryCatch(
+            fs.mkdir(worktreeBaseDir, { recursive: true })
         );
+        if (mkdirError) {
+            printError(
+                `Could not create ${dir} directory: ${mkdirError.message}`
+            );
+            process.exit(EXIT_CODES.ERROR);
+        }
+        await fs
+            .writeFile(path.join(worktreeBaseDir, ".gitignore"), "*\n", {
+                flag: "wx",
+            })
+            .catch((error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+                    printWarn(`  Could not create ${dir}/.gitignore.`);
+                }
+            });
+
+        const preservedLines: string[] = [];
+        if (rcContent !== null) {
+            const sourceLines = rcContent.split("\n");
+            if (sourceLines[sourceLines.length - 1] === "") {
+                sourceLines.pop();
+            }
+            for (const line of sourceLines) {
+                const trimmed = line.trim();
+                const eqIndex = trimmed.indexOf("=");
+                const key =
+                    trimmed === "" || trimmed.startsWith("#") || eqIndex === -1
+                        ? ""
+                        : trimmed.slice(0, eqIndex).trim();
+                if (key === "DEFAULT_BASE" || key === "WORKTREE_DIR") continue;
+                preservedLines.push(line);
+            }
+        }
         const lines = [
             `DEFAULT_BASE=${formatValue(base)}`,
             `WORKTREE_DIR=${formatValue(dir)}`,
-            ...otherKeys.map((key) => `${key}=${formatValue(raw[key] ?? "")}`),
+            ...preservedLines,
         ];
         const { error: writeError } = await tryCatch(
             fs.writeFile(rcPath, `${lines.join("\n")}\n`)
@@ -238,24 +292,6 @@ export const setupCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
         printSuccess(`Wrote ${rcPath}`);
-
-        const worktreeBaseDir = path.join(root, dir);
-        const { error: mkdirError } = await tryCatch(
-            fs.mkdir(worktreeBaseDir, { recursive: true })
-        );
-        if (mkdirError) {
-            printWarn(`  Could not create ${dir} directory.`);
-        } else {
-            await fs
-                .writeFile(path.join(worktreeBaseDir, ".gitignore"), "*\n", {
-                    flag: "wx",
-                })
-                .catch((error: unknown) => {
-                    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-                        printWarn(`  Could not create ${dir}/.gitignore.`);
-                    }
-                });
-        }
 
         const gitignorePath = path.join(root, ".gitignore");
         const { data: gitignoreContent } = await tryCatch(

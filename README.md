@@ -25,7 +25,7 @@ Then commit the result so teammates get the same defaults:
 DEFAULT_BASE=origin/dev
 ```
 
-Add `.worktrees/` to your `.gitignore`:
+`setup` asks before adding your worktree directory to the root `.gitignore` (and always creates `<dir>/.gitignore` inside it). Only add it by hand if you declined that prompt:
 
 ```
 .worktrees/
