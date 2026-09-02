@@ -130,7 +130,7 @@ Pre-built binaries are available for:
 
 ## Development
 
-Requires [Bun](https://bun.sh).
+Requires [Bun 1.4.0](https://bun.sh).
 
 ```bash
 bun install

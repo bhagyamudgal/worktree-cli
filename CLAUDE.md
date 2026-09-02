@@ -1,6 +1,6 @@
 # worktree-cli
 
-Git worktree manager CLI built with Bun + TypeScript. Compiles to a standalone binary via `bun build --compile`.
+Git worktree manager CLI built with Bun 1.4.0 + TypeScript. Compiles to a standalone binary via `bun build --compile`.
 
 ## Commands
 

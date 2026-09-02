@@ -4,6 +4,7 @@
   "description": "Git worktree manager with automatic env file copying, dependency installation, and editor integration.",
   "type": "module",
   "module": "src/index.ts",
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --compile --outfile dist/worktree",
