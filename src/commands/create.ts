@@ -97,7 +97,8 @@ export const createCommand = command({
         } else {
             if (!base) {
                 printError("No default base branch configured.");
-                printError("Create a .worktreerc file at your repo root with:");
+                printError("Run 'worktree setup' to configure it, or");
+                printError("create a .worktreerc file at your repo root with:");
                 printError("  DEFAULT_BASE=origin/dev");
                 printError("Or use --base <branch> to specify one.");
                 process.exit(EXIT_CODES.ERROR);
