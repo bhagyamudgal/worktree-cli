@@ -12,13 +12,20 @@ Or download the binary directly from [Releases](https://github.com/bhagyamudgal/
 
 ## Setup
 
-Create a `.worktreerc` file at your repo root and **commit it** so teammates get the same defaults:
+Run this once per repo (it writes `.worktreerc` and wires up gitignores):
+
+```bash
+worktree setup                          # interactive: pick base branch + worktree dir
+worktree setup --base origin/dev --yes  # non-interactive (scripts/CI)
+```
+
+Then commit the result so teammates get the same defaults:
 
 ```
 DEFAULT_BASE=origin/dev
 ```
 
-Add `.worktrees/` to your `.gitignore`:
+`setup` asks before adding your worktree directory to the root `.gitignore` (and always creates `<dir>/.gitignore` inside it). Only add it by hand if you declined that prompt:
 
 ```
 .worktrees/
@@ -27,6 +34,7 @@ Add `.worktrees/` to your `.gitignore`:
 ## Usage
 
 ```bash
+worktree setup                                    # configure .worktreerc (interactive)
 worktree create feature-auth                    # new branch from configured base
 worktree create feature-auth --base main        # override base branch
 worktree create feature-auth --editor code      # open in VS Code

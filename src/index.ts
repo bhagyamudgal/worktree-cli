@@ -5,6 +5,7 @@ import { internalUpdateCheckCommand } from "./commands/internal-update-check";
 import { listCommand } from "./commands/list";
 import { openCommand } from "./commands/open";
 import { removeCommand } from "./commands/remove";
+import { setupCommand } from "./commands/setup";
 import { updateCommand } from "./commands/update";
 import {
     appendBackgroundCheckPanic,
@@ -54,6 +55,7 @@ run(
         listCommand,
         openCommand,
         removeCommand,
+        setupCommand,
         updateCommand,
         internalUpdateCheckCommand,
     ],
