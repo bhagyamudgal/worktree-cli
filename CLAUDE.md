@@ -1,6 +1,6 @@
 # worktree-cli
 
-Git worktree manager CLI built with Bun + TypeScript. Compiles to a standalone binary via `bun build --compile`.
+Git worktree manager CLI built with Bun 1.4.0 + TypeScript. Compiles to a standalone binary via `bun build --compile`.
 
 ## Commands
 
@@ -15,7 +15,7 @@ bun run format               # Prettier
 ## Architecture
 
 - `src/index.ts` — Entry point. Registers commands with brocli's `run()`.
-- `src/commands/` — One file per CLI command (create, list, open, remove). Each exports a brocli `command()`.
+- `src/commands/` — One file per CLI command. Each exports a brocli `command()`.
 - `src/lib/` — Shared utilities:
   - `git.ts` — All git subprocess wrappers. Uses `run()` from `shell.ts` with array args.
   - `shell.ts` — Thin `Bun.spawn` wrapper. Returns `{ stdout, stderr, exitCode }`.
@@ -62,23 +62,6 @@ bun run format               # Prettier
 - `@clack/prompts` — Interactive terminal prompts (select, confirm)
 - `zod` — Config schema validation
 
-## Changelog
+## Changesets and releases
 
-When making changes, always update `CHANGELOG.md` before committing. The file follows [Keep a Changelog](https://keepachangelog.com) format.
-
-- Add entries under an `## [Unreleased]` section at the top while work is in progress.
-- When releasing, rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD` with the version from `package.json`.
-- Use these categories: `Added`, `Changed`, `Fixed`, `Removed`.
-- Write entries from the user's perspective — describe what changed, not implementation details.
-
-## Release
-
-```bash
-# 1. Update version in package.json
-# 2. Update CHANGELOG.md
-# 3. Commit
-# 4. Run:
-./release.sh
-```
-
-This tags the version and pushes to trigger GitHub Actions, which builds binaries for all platforms and creates a GitHub Release.
+Run `bun changeset` for every user-visible change and commit the generated file with the pull request. The release workflow owns `package.json` versions, `CHANGELOG.md`, tags, and GitHub Releases. See `.changeset/README.md` for bump rules and the release sequence.

@@ -35,6 +35,8 @@ worktree open feature-auth                      # open existing worktree in edit
 worktree open feature-auth --editor cursor      # open in Cursor
 worktree open feature-auth --editor zed         # open in Zed
 worktree list                                   # list all worktrees with status
+worktree clean                                  # remove clean, merged worktrees
+worktree clean --yes                            # remove without confirmation
 worktree remove feature-auth                    # remove worktree + cleanup branch
 ```
 
@@ -60,6 +62,16 @@ On `remove`, it:
 2. Handles broken git references gracefully (falls back to `trash` if available)
 3. Cleans up the local branch
 4. Removes empty parent directories
+
+On `clean`, it:
+
+1. Fetches the latest `origin` refs and aborts if the fetch fails
+2. Finds registered worktrees whose HEAD is merged into the origin default branch
+3. Skips worktrees with uncommitted files, except Git-ignored files and `.husky/_` internals
+4. Previews every eligible worktree and confirms once before removing them
+5. Attempts to delete a removed worktree's local branch when one exists, but preserves it if another worktree uses it, its tip changed after verification, or deletion fails; remote branches are never touched
+
+The primary, current, locked, broken, and submodule-bearing worktrees are never removed. Detached and externally located registered worktrees are eligible when their HEAD is merged. Use `--yes` to bypass the confirmation prompt.
 
 ## Config
 
@@ -118,7 +130,7 @@ Pre-built binaries are available for:
 
 ## Development
 
-Requires [Bun](https://bun.sh).
+Requires [Bun 1.4.0](https://bun.sh).
 
 ```bash
 bun install
@@ -132,13 +144,10 @@ bun run format               # Prettier
 ### Releasing
 
 ```bash
-# 1. Update version in package.json
-# 2. Update CHANGELOG.md
-# 3. Commit, then run:
-./release.sh
+bun changeset
 ```
 
-This tags the version and pushes to trigger GitHub Actions, which builds binaries for all platforms and creates a GitHub Release.
+Commit the generated changeset with the user-visible change. Merging it to `main` opens a `chore: version packages` pull request. Merging that pull request updates the package version and changelog, builds all platform binaries, and creates the GitHub Release.
 
 ### CI
 

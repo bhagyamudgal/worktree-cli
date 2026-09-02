@@ -1,6 +1,8 @@
 import * as p from "@clack/prompts";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { run } from "./shell";
+import { isEnoent } from "./fs-utils";
 import { printError, printWarn } from "./logger";
 import { EXIT_CODES } from "./constants";
 import { tryCatch } from "./try-catch";
@@ -59,7 +61,7 @@ async function gitWorktreeRemove(
 }
 
 async function gitWorktreeListPorcelain(): Promise<string> {
-    const result = await run("git", ["worktree", "list", "--porcelain"]);
+    const result = await run("git", ["worktree", "list", "--porcelain", "-z"]);
     if (result.exitCode !== 0) {
         printError(`git worktree list failed: ${result.stderr}`);
         process.exit(EXIT_CODES.ERROR);
@@ -70,6 +72,8 @@ async function gitWorktreeListPorcelain(): Promise<string> {
 type WorktreeEntry = {
     path: string;
     branch: string;
+    isLocked: boolean;
+    isPrunable: boolean;
 };
 
 type BranchStatus = {
@@ -79,28 +83,240 @@ type BranchStatus = {
     isMerged: boolean | null;
 };
 
+const STATUS_PATH_FIELD_COUNTS: Record<string, number> = {
+    "1": 8,
+    "2": 9,
+    u: 10,
+};
+
+const WORKTREE_OPERATION_MARKERS = [
+    { path: "MERGE_HEAD", name: "merge" },
+    { path: "CHERRY_PICK_HEAD", name: "cherry-pick" },
+    { path: "REVERT_HEAD", name: "revert" },
+    { path: "rebase-merge", name: "rebase" },
+    { path: "rebase-apply", name: "rebase" },
+    { path: "BISECT_LOG", name: "bisect" },
+    { path: "sequencer", name: "sequenced operation" },
+] as const;
+
 function parsePorcelainOutput(output: string): WorktreeEntry[] {
     const entries: WorktreeEntry[] = [];
     let currentPath = "";
     let currentBranch = "";
+    let isLocked = false;
+    let isPrunable = false;
 
-    for (const line of output.split("\n")) {
+    const attributes = output.includes("\0")
+        ? output.split("\0")
+        : output.split("\n");
+
+    for (const line of attributes) {
         if (line.startsWith("worktree ")) {
             if (currentPath) {
-                entries.push({ path: currentPath, branch: currentBranch });
+                entries.push({
+                    path: currentPath,
+                    branch: currentBranch,
+                    isLocked,
+                    isPrunable,
+                });
             }
             currentPath = line.slice("worktree ".length);
             currentBranch = "";
+            isLocked = false;
+            isPrunable = false;
         } else if (line.startsWith("branch refs/heads/")) {
             currentBranch = line.slice("branch refs/heads/".length);
+        } else if (line === "locked" || line.startsWith("locked ")) {
+            isLocked = true;
+        } else if (line === "prunable" || line.startsWith("prunable ")) {
+            isPrunable = true;
         }
     }
 
     if (currentPath) {
-        entries.push({ path: currentPath, branch: currentBranch });
+        entries.push({
+            path: currentPath,
+            branch: currentBranch,
+            isLocked,
+            isPrunable,
+        });
     }
 
     return entries;
+}
+
+function parseStatusPaths(output: string): string[] | null {
+    if (output === "") return [];
+
+    const records = output.split("\0");
+    const paths: string[] = [];
+
+    for (let index = 0; index < records.length; index++) {
+        const record = records[index];
+        if (record === "") continue;
+
+        if (record.startsWith("? ")) {
+            paths.push(record.slice(2));
+            continue;
+        }
+
+        const recordType = record[0] ?? "";
+        const fieldCount = STATUS_PATH_FIELD_COUNTS[recordType];
+        if (fieldCount === undefined) return null;
+
+        let pathStart = 0;
+        for (let field = 0; field < fieldCount; field++) {
+            pathStart = record.indexOf(" ", pathStart);
+            if (pathStart === -1) return null;
+            pathStart++;
+        }
+
+        const filePath = record.slice(pathStart);
+        if (filePath === "") return null;
+        paths.push(filePath);
+
+        if (recordType === "2") {
+            const originalPath = records[++index];
+            if (!originalPath) return null;
+            paths.push(originalPath);
+        }
+    }
+
+    return paths;
+}
+
+async function gitWorktreeChangePaths(cwd: string): Promise<string[] | null> {
+    const result = await run(
+        "git",
+        [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        { cwd }
+    );
+    if (result.exitCode !== 0) return null;
+    return parseStatusPaths(result.stdout);
+}
+
+async function gitWorktreeHasSubmodules(cwd: string): Promise<boolean | null> {
+    const result = await run("git", ["ls-files", "--stage", "-z"], { cwd });
+    if (result.exitCode !== 0) return null;
+    return result.stdout.split("\0").some(function (record) {
+        return record.startsWith("160000 ");
+    });
+}
+
+async function gitWorktreeOperation(cwd: string): Promise<string | null> {
+    for (const marker of WORKTREE_OPERATION_MARKERS) {
+        const result = await run(
+            "git",
+            ["rev-parse", "--git-path", marker.path],
+            {
+                cwd,
+            }
+        );
+        if (result.exitCode !== 0) {
+            throw new Error(result.stderr || "git rev-parse --git-path failed");
+        }
+
+        const { data: markerStat, error } = await tryCatch(
+            fs.stat(result.stdout)
+        );
+        if (markerStat !== null) return marker.name;
+        if (error && !isEnoent(error)) throw error;
+    }
+    return null;
+}
+
+async function gitDiscardHuskyResidue(cwd: string): Promise<boolean> {
+    const tracked = await run("git", ["ls-files", "--", ".husky/_"], { cwd });
+    if (tracked.exitCode !== 0) return false;
+
+    if (tracked.stdout !== "") {
+        const restore = await run(
+            "git",
+            [
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                ".husky/_",
+            ],
+            { cwd }
+        );
+        if (restore.exitCode !== 0) return false;
+    }
+
+    const clean = await run("git", ["clean", "-fd", "--", ".husky/_"], {
+        cwd,
+    });
+    return clean.exitCode === 0;
+}
+
+async function gitRevParseHead(cwd: string): Promise<string | null> {
+    const result = await run("git", ["rev-parse", "--verify", "HEAD"], {
+        cwd,
+    });
+    return result.exitCode === 0 && result.stdout !== "" ? result.stdout : null;
+}
+
+async function gitBranchDeleteIfMatches(
+    cwd: string,
+    branch: string,
+    expectedHead: string,
+    defaultBranch: string
+): Promise<"deleted" | "checked-out" | "changed" | "failed"> {
+    const current = await run(
+        "git",
+        ["rev-parse", "--verify", `refs/heads/${branch}`],
+        { cwd }
+    );
+    if (current.exitCode !== 0 || current.stdout !== expectedHead) {
+        return "changed";
+    }
+
+    const deletion = await run(
+        "git",
+        [
+            "-c",
+            `branch.${branch}.remote=origin`,
+            "-c",
+            `branch.${branch}.merge=refs/heads/${defaultBranch}`,
+            "branch",
+            "-d",
+            branch,
+        ],
+        { cwd }
+    );
+    if (deletion.exitCode === 0) return "deleted";
+
+    const refreshed = await run(
+        "git",
+        ["rev-parse", "--verify", `refs/heads/${branch}`],
+        { cwd }
+    );
+    if (refreshed.exitCode !== 0 || refreshed.stdout !== expectedHead) {
+        return "changed";
+    }
+
+    const worktrees = await run("git", [
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+    ]);
+    if (worktrees.exitCode !== 0) return "failed";
+
+    const isCheckedOut = parsePorcelainOutput(worktrees.stdout).some(
+        function (entry) {
+            return entry.branch === branch;
+        }
+    );
+    return isCheckedOut ? "checked-out" : "failed";
 }
 
 async function gitWorktreePrune(expire?: string): Promise<boolean> {
@@ -214,13 +430,14 @@ async function gitBranchStatus(
 
 async function checkMergedIntoOrigin(
     cwd: string,
-    defaultBranch: string | null
+    defaultBranch: string | null,
+    ref = "HEAD"
 ): Promise<boolean | null> {
     if (!defaultBranch) return null;
 
     const result = await run(
         "git",
-        ["merge-base", "--is-ancestor", "HEAD", `origin/${defaultBranch}`],
+        ["merge-base", "--is-ancestor", ref, `origin/${defaultBranch}`],
         { cwd }
     );
 
@@ -312,6 +529,7 @@ export {
     gitWorktreeRemove,
     gitWorktreeListPorcelain,
     parsePorcelainOutput,
+    parseStatusPaths,
     gitWorktreePrune,
     gitBranchDelete,
     gitBranchShowCurrent,
@@ -320,6 +538,13 @@ export {
     gitRevParseGitDir,
     getDefaultBranch,
     gitBranchStatus,
+    gitWorktreeChangePaths,
+    gitWorktreeHasSubmodules,
+    gitWorktreeOperation,
+    gitDiscardHuskyResidue,
+    gitRevParseHead,
+    gitBranchDeleteIfMatches,
+    checkMergedIntoOrigin,
     formatBranchStatusHint,
     selectWorktree,
 };
