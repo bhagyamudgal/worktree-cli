@@ -46,7 +46,7 @@ jobs:
               run: bun install --frozen-lockfile
 
             - name: Collect changesets into a version pull request
-              uses: changesets/action@v2
+              uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1
               with:
                   commit-message: "chore: version packages"
                   pr-title: "chore: version packages"
@@ -223,7 +223,7 @@ jobs:
                   bash .github/scripts/verify-release-tag.sh "$VERSION" "$RELEASE_SHA" true
 
             - name: Create draft GitHub Release
-              uses: softprops/action-gh-release@v2
+              uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
               with:
                   tag_name: v${{ env.VERSION }}
                   target_commitish: ${{ needs.version.outputs.release-sha }}
