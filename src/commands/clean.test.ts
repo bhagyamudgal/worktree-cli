@@ -451,6 +451,34 @@ describe("clean command", () => {
         );
     });
 
+    it("fails when a worktree cannot be checked for merge eligibility", async () => {
+        const { directory, root } = await createTestRepository();
+        const worktreePath = path.join(directory, "unverifiable-worktree");
+        await run(
+            "git",
+            [
+                "worktree",
+                "add",
+                "-b",
+                "unverifiable-branch",
+                worktreePath,
+                "main",
+            ],
+            { cwd: root }
+        );
+        await fs.writeFile(
+            path.join(root, ".worktreerc"),
+            "DEFAULT_BASE=origin/missing\n"
+        );
+
+        const result = await runClean(root);
+
+        expect(result.exitCode).toBe(1);
+        expect(await fs.stat(worktreePath).catch(() => null)).not.toBeNull();
+        expect(result.stderr).toContain("Inspection failures (1)");
+        expect(result.stderr).toContain("could not verify merge status");
+    });
+
     it("keeps a branch when its tip no longer matches the verified HEAD", async () => {
         const { root } = await createTestRepository();
         const expectedHead = (

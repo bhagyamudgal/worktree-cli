@@ -189,6 +189,10 @@ export const cleanCommand = command({
                 failures.push(`${entry.path}: ${error.message}`);
                 continue;
             }
+            if (eligibility instanceof Error) {
+                failures.push(`${entry.path}: ${eligibility.message}`);
+                continue;
+            }
             if (eligibility !== null) {
                 skipped.push(`${entry.path}: ${eligibility}`);
                 continue;

@@ -69,7 +69,7 @@ On `clean`, it:
 2. Finds registered worktrees whose HEAD is merged into the origin default branch
 3. Skips worktrees with uncommitted files, except Git-ignored files and `.husky/_` internals
 4. Previews every eligible worktree and confirms once before removing them
-5. Deletes each removed worktree's local branch while leaving remote branches untouched
+5. Attempts to delete a removed worktree's local branch when one exists, but preserves it if another worktree uses it, its tip changed after verification, or deletion fails; remote branches are never touched
 
 The primary, current, locked, broken, and submodule-bearing worktrees are never removed. Detached and externally located registered worktrees are eligible when their HEAD is merged. Use `--yes` to bypass the confirmation prompt.
 
