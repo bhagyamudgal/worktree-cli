@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+### Patch Changes
+
+- 378ab44: Fix interactive select lists duplicating options when navigating with arrow keys by upgrading @clack/prompts to 1.x
+
 ## 1.5.0
 
 ### Minor Changes
