@@ -28,7 +28,7 @@
     ]
   },
   "dependencies": {
-    "@clack/prompts": "^0.9",
+    "@clack/prompts": "^1.7.0",
     "@drizzle-team/brocli": "^0.10",
     "zod": "^4"
   },

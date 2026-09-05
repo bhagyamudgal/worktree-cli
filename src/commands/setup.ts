@@ -117,7 +117,7 @@ async function promptForBase(
         message: "Enter default base branch",
         initialValue: currentBase ?? candidates[0] ?? "",
         validate: function (value) {
-            if (value.trim() === "") return "Base branch is required.";
+            if ((value ?? "").trim() === "") return "Base branch is required.";
             return undefined;
         },
     });
@@ -133,7 +133,7 @@ async function promptForDir(currentDir: string): Promise<string> {
         message: "Worktree directory name",
         initialValue: currentDir,
         validate: function (value) {
-            return validateDirValue(value.trim()) ?? undefined;
+            return validateDirValue((value ?? "").trim()) ?? undefined;
         },
     });
     if (p.isCancel(entered)) {
