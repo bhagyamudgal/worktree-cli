@@ -1,5 +1,4 @@
 node_modules/
 dist/
 .worktrees
-docs/
 tasks/

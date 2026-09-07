@@ -85,7 +85,7 @@ export const updateCommand = command({
         printInfo(`Downloading ${assetName}...`);
 
         const tmpPath = `${binaryPath}.update-tmp`;
-        // Pre-unlink to prevent symlink-follow in shared install dirs.
+        // docs/adr_auto_update_security.md §5
         await safeUnlink(tmpPath);
         const { error: dlError } = await tryCatch(
             downloadAsset(asset, tmpPath)
@@ -150,7 +150,7 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        // Probe before rename — SHA match ≠ runnable; segfaults on libc/codesign mismatch.
+        // docs/adr_auto_update_security.md §5
         const probe = probeBinaryRuns(tmpPath);
         if (!probe.ok) {
             await safeUnlink(tmpPath);
@@ -177,7 +177,7 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        // Invalidate pending stage + bump throttle to prevent silent downgrade on next launch.
+        // docs/adr_auto_update_security.md §5, §6
         cleanupStagedArtifacts();
         recordCheckCompleted();
 

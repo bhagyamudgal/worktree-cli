@@ -36,7 +36,6 @@ function safeUnlinkSync(filePath: string): void {
 
 type WriteErrorCode = "EACCES" | "EPERM" | "EROFS" | "EBUSY" | "ETXTBSY";
 
-// Walks cause chain for errno; EBUSY/ETXTBSY treated as permanent (file locked/busy).
 const WRITE_ERROR_CODES = new Set([
     "EACCES",
     "EPERM",
@@ -59,7 +58,6 @@ function classifyWriteError(error: unknown): WriteErrorCode | null {
     return null;
 }
 
-// Unwrap `cause` to surface the original errno message instead of a generic wrapper.
 function deepestMessage(error: unknown): string {
     let cur: unknown = error;
     while (cur instanceof Error && cur.cause !== undefined) {

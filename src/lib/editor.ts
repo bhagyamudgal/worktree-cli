@@ -44,7 +44,6 @@ async function resolveEditor(preferred?: string): Promise<string | null> {
         process.exit(EXIT_CODES.ERROR);
     }
 
-    // clack's select returns string | symbol, but isCancel narrows the symbol case above
     return choice as EditorChoice;
 }
 
