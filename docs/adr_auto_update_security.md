@@ -17,14 +17,17 @@ and hiding version numbers.
 
 ## 2. Host pinning and redirects
 
-Fetches go only to allowlisted GitHub origins: api.github.com, github.com,
+Fetches go only to allowlisted GitHub hosts: api.github.com, github.com,
 codeload.github.com, objects.githubusercontent.com,
 release-assets.githubusercontent.com, and
-github-releases.githubusercontent.com. Redirects are followed manually so
-each hop's host is validated before connecting. Authorization is stripped on
-any cross-origin hop and never re-added, so a chain that bounces back to the
-origin cannot re-attach the token. Refusals log the host only, because signed
-CDN URLs can carry tokens in the query string.
+github-releases.githubusercontent.com. The check compares URL.host and does
+not require HTTPS. Redirects are followed manually so each hop's host is
+validated before connecting. Authorization is stripped once the host differs
+from the first URL's host and never re-added, so a chain that bounces back
+to the starting host cannot re-attach the token; a same-host scheme change
+does not strip it. Redirect refusals log the host only, because signed CDN
+URLs can carry tokens in the query string, while the initial
+disallowed-host refusal logs a truncated URL.
 
 ## 3. Size caps
 
@@ -42,8 +45,10 @@ duplicate entries as tampering. Tamper (parsed but malformed sums) is a
 distinct outcome from fetch errors: tamper escalates loudly and burns the
 throttle, while fetch errors retry when transient. Retryable statuses are
 5xx plus 403 and 429, which are the GitHub rate-limit signals; other 4xx are
-permanent. Releases without SHA256SUMS fall back to a self-hash, which
-detects local stage-to-apply corruption only, not upstream tampering.
+permanent. In the background path, releases without SHA256SUMS fall back to
+a self-hash recorded in the sidecar, which detects local stage-to-apply
+corruption only, not upstream tampering; the foreground updater instead
+proceeds without hash verification and says so.
 Requests identify as worktree-cli and use GITHUB_TOKEN when present, since
 authenticated calls get a far higher rate limit than anonymous ones.
 

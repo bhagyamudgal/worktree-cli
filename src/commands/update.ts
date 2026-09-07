@@ -177,7 +177,7 @@ export const updateCommand = command({
             process.exit(EXIT_CODES.ERROR);
         }
 
-        // docs/adr_auto_update_security.md §5
+        // docs/adr_auto_update_security.md §5, §6
         cleanupStagedArtifacts();
         recordCheckCompleted();
 
