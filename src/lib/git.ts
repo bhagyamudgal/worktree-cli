@@ -517,7 +517,6 @@ async function selectWorktree(
         process.exit(EXIT_CODES.SUCCESS);
     }
 
-    // p.select returns string | symbol, but isCancel above exits on symbol — library types don't narrow
     return selected as string;
 }
 

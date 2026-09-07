@@ -8,7 +8,7 @@ import pkg from "../../package.json";
 const REPO = "bhagyamudgal/worktree-cli";
 const API_RELEASES_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
 
-// Host-pin fetches to GitHub origins; defense-in-depth against CDN/release-asset compromise.
+// docs/adr_auto_update_security.md §2
 const ALLOWED_RELEASE_HOSTS = new Set([
     "api.github.com",
     "github.com",
@@ -28,7 +28,7 @@ function isAllowedReleaseHost(urlString: string): boolean {
 
 const RELEASE_TAG_PATTERN = /^v?\d+\.\d+\.\d+(?:-[\w.-]+)?$/;
 
-// Identify as worktree-cli; GITHUB_TOKEN bumps rate limit from 60/hr to 5000/hr.
+// docs/adr_auto_update_security.md §4
 function buildGitHubHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
         "User-Agent": `worktree-cli/${pkg.version}`,
@@ -44,7 +44,7 @@ function buildGitHubHeaders(): Record<string, string> {
 
 const DEFAULT_META_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSET_TIMEOUT_MS = 600_000;
-// 4× headroom over current ~50 MB binary; rejects oversized CDN responses pre-verification.
+// docs/adr_auto_update_security.md §3
 const MAX_ASSET_BYTES = 200 * 1024 * 1024;
 const MAX_REDIRECT_HOPS = 5;
 
@@ -103,7 +103,7 @@ function parseVersion(v: string): ParsedVersion {
     };
 }
 
-// SemVer 2.0 §11: pairwise compare; numeric<numeric numerically; numeric<string; longer wins on tie.
+// SemVer 2.0 §11
 function comparePrereleaseIdentifier(a: string, b: string): number {
     const aNumeric = /^\d+$/.test(a);
     const bNumeric = /^\d+$/.test(b);
@@ -123,7 +123,7 @@ function comparePrereleaseIdentifier(a: string, b: string): number {
 
 function comparePrerelease(a: string | null, b: string | null): number {
     if (a === b) return 0;
-    // A version with a prerelease has lower precedence than one without.
+    // SemVer 2.0 §11
     if (a === null) return 1;
     if (b === null) return -1;
     const aParts = a.split(".");
@@ -180,12 +180,10 @@ async function withTimeout<T>(
         controller.abort();
     }, timeoutMs);
     try {
-        // Follow redirects manually so each hop's host is validated BEFORE we connect to it —
-        // default `redirect: "follow"` connects to intermediate hosts and only exposes the final URL.
+        // docs/adr_auto_update_security.md §2
         const originHost = new URL(url).host;
         let currentUrl = url;
-        // Once Authorization has been stripped on any cross-origin hop, never re-add —
-        // prevents a redirect chain that bounces back to the origin host from re-attaching the token.
+        // docs/adr_auto_update_security.md §2
         let authStripped = false;
         for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
             const headers = buildGitHubHeaders();
@@ -200,7 +198,6 @@ async function withTimeout<T>(
             });
             if (response.status >= 300 && response.status < 400) {
                 const location = response.headers.get("location");
-                // Drain the redirect body so keep-alive sockets don't pin across hops.
                 await tryCatch(response.body?.cancel() ?? Promise.resolve());
                 if (!location) {
                     throw new Error(
@@ -209,7 +206,7 @@ async function withTimeout<T>(
                 }
                 const next = new URL(location, currentUrl).toString();
                 if (!isAllowedReleaseHost(next)) {
-                    // Log host only, not the full URL — signed CDN URLs can carry tokens in the query string.
+                    // docs/adr_auto_update_security.md §2
                     throw new Error(
                         `Refused redirect to disallowed host: ${new URL(next).host}`
                     );
@@ -241,7 +238,7 @@ async function fetchLatestRelease(
             if (!isReleaseInfo(json)) {
                 throw new Error("Release payload missing tag_name or assets");
             }
-            // Reject malformed tags at the boundary so they can't propagate into paths/logs.
+            // docs/adr_auto_update_security.md §4
             if (!RELEASE_TAG_PATTERN.test(json.tag_name)) {
                 throw new Error(
                     `Release tag malformed: ${JSON.stringify(json.tag_name.slice(0, 40))}`
@@ -301,8 +298,7 @@ async function downloadAsset(
                         `Download ${asset.name} refused: empty response body`
                     );
                 }
-                // Stream chunks directly to disk, enforcing the cap as bytes arrive.
-                // Avoids the ~2× memory peak of buffering all chunks then copying into one final Uint8Array.
+                // docs/adr_auto_update_security.md §3
                 const reader = response.body.getReader();
                 const writer = fs.createWriteStream(destPath, { flags: "w" });
                 let bytesReceived = 0;
@@ -323,7 +319,6 @@ async function downloadAsset(
                         }
                     }
                     if (bytesReceived === 0) {
-                        // Explicit empty-body error; else SHA verify later reports a misleading mismatch.
                         throw new Error(
                             `Download ${asset.name} refused: empty response body`
                         );
@@ -352,7 +347,6 @@ async function downloadAsset(
         )
     );
     if (error) {
-        // Clean up our own partial write so callers don't have to do it defensively.
         const { error: cleanupError } = tryCatchSync(function () {
             fs.unlinkSync(destPath);
         });
@@ -433,7 +427,7 @@ function verifyBinaryHashSync(
 
 function constantTimeEquals(a: string, b: string): boolean {
     if (a.length !== b.length) return false;
-    // Constant-time compare prevents timing side-channel on hash compare.
+    // docs/adr_auto_update_security.md §5
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
@@ -441,10 +435,10 @@ type Sha256SumsResult =
     | { kind: "not-published" }
     | { kind: "ok"; sums: Record<string, string> }
     | { kind: "error"; reason: string; retryable: boolean }
-    // "tamper" = parsed-but-malformed sums (today: duplicates) — distinct from transient "error".
+    // docs/adr_auto_update_security.md §4
     | { kind: "tamper"; reason: string };
 
-// 5xx and 403/429 (rate-limit) retryable; other 4xx treated as permanent.
+// docs/adr_auto_update_security.md §4
 function isRetryableHttpStatus(status: number): boolean {
     if (status === 403 || status === 429) return true;
     return status >= 500 && status < 600;
@@ -478,7 +472,7 @@ async function fetchSha256Sums(
                         retryable: true,
                     };
                 }
-                // Duplicate entries are tampering, not transient — permanent failure.
+                // docs/adr_auto_update_security.md §4
                 const { data: parsed, error: parseError } = tryCatchSync(
                     function () {
                         return parseSha256Sums(text);
@@ -505,7 +499,7 @@ async function fetchSha256Sums(
 }
 
 type VerifyAssetResult =
-    | { ok: true; hash: string | null } // hash === null when SHA256SUMS isn't published
+    | { ok: true; hash: string | null }
     | { ok: false; kind: "sums-error"; reason: string; retryable: boolean }
     | { ok: false; kind: "sums-tamper"; reason: string }
     | { ok: false; kind: "missing-entry" }
@@ -551,7 +545,7 @@ async function verifyAssetAgainstSums(
 }
 
 function parseSha256Sums(text: string): Record<string, string> {
-    // Null-prototype object blocks __proto__/constructor pollution from a tampered file.
+    // docs/adr_auto_update_security.md §5
     const result: Record<string, string> = Object.create(null);
     for (const line of text.split("\n")) {
         const trimmed = line.trim();

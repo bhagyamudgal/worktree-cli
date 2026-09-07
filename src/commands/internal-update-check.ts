@@ -10,7 +10,6 @@ export const internalUpdateCheckCommand = command({
     desc: "",
     hidden: true,
     handler: async () => {
-        // Detached child's stderr is redirected; catch so panics still hit last-error.
         try {
             await runBackgroundUpdateCheck();
         } catch (error) {

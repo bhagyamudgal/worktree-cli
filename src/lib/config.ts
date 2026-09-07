@@ -93,7 +93,6 @@ async function readConfigFile(
 ): Promise<Config> {
     const file = Bun.file(filePath);
     const display = displayPath(filePath);
-    // file.exists() can throw on stat errors — guard like shouldAutoUpdate below.
     const { data: isExists, error: existsError } = await tryCatch(
         file.exists()
     );
@@ -115,7 +114,6 @@ async function readConfigFile(
     }
     const raw = parseConfigContent(content);
     if (scope === "project" && "AUTO_UPDATE" in raw) {
-        // Also validate — user moving this line to ~/.worktreerc later needs to know if it's syntactically valid.
         const { data: probe, error: probeError } = tryCatchSync(function () {
             return booleanLike.safeParse(raw.AUTO_UPDATE);
         });
@@ -129,7 +127,6 @@ async function readConfigFile(
             `${filePath}:AUTO_UPDATE`,
             `warning: AUTO_UPDATE in project ${display} is ignored — set it in ~/.worktreerc instead${validityNote}.`
         );
-        // Strip pre-validate so `AUTO_UPDATE=junk` doesn't discard valid sibling keys.
         delete raw.AUTO_UPDATE;
     }
     const { data: parsed, error: parseError } = tryCatchSync(function () {
@@ -167,12 +164,9 @@ function decideAutoUpdateFromContent(
     return parsed.AUTO_UPDATE;
 }
 
-// Fail CLOSED on parse/read errors so a typo can't silently override opt-out.
-// `onError` threads diagnostics so users discover *why* auto-update is disabled.
 async function shouldAutoUpdate(onError?: AutoUpdateOnError): Promise<boolean> {
     const filePath = path.join(os.homedir(), ".worktreerc");
     const file = Bun.file(filePath);
-    // `file.exists()` can throw EACCES; guard to avoid crashing the scheduler.
     const { data: isExists, error: existsError } = await tryCatch(
         file.exists()
     );
@@ -189,7 +183,6 @@ async function shouldAutoUpdate(onError?: AutoUpdateOnError): Promise<boolean> {
     return decideAutoUpdateFromContent(content, onError);
 }
 
-// Sync twin used at startup by applyPendingUpdate (before brocli.run / top-level await).
 function shouldAutoUpdateSync(onError?: AutoUpdateOnError): boolean {
     const filePath = path.join(os.homedir(), ".worktreerc");
     const { data: isExists, error: existsError } = tryCatchSync(function () {
